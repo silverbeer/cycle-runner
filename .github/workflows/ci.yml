@@ -14,5 +14,5 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked
-      # No Ollama and no Telegram credentials here: those tests stay local.
-      - run: uv run pytest -m "not ollama and not telegram"
+      # No Ollama, Telegram or Linear credentials here: those tests stay local.
+      - run: uv run pytest -m "not ollama and not telegram and not linear"

@@ -110,7 +110,7 @@ def test_returns_empty_string_when_agent_has_no_final_text():
 
 
 @pytest.mark.ollama
-def test_three_message_conversation_shares_one_session(ollama):
+def test_three_message_conversation_shares_one_session(ollama, fake_linear):
     runner = Runner(
         app_name="cycle_runner",
         agent=root_agent,

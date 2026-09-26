@@ -10,8 +10,9 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
   The model decides for itself when to call it. Nothing talks to Linear yet.
 - **V0.3**: Telegram as the human interface, behind a small generic gateway, so
   the Telegram layer carries no Cycle Runner logic. See [V0.3](#v03).
-- **V0.4**: the cycle and its issues live in SQLite and survive restarts. One
-  domain tool, `get_cycle_status`, reads them. See [V0.4](#v04).
+- **V0.4**: cycle state in SQLite, surviving restarts. (Superseded by V0.5.)
+- **V0.5**: read-only Linear. `get_cycle_status` and `get_issue` read the SB
+  team's real cycle and issues; the SQLite demo layer is gone. See [V0.5](#v05).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -32,8 +33,10 @@ ollama pull gemma4:12b      # ~7.6 GB
 
 ```bash
 uv sync
-uv run python -m cycle_runner.bootstrap   # create data/cycle-runner.db with the demo cycle
 ```
+
+Secrets live in 1Password; `.env` holds `op://` references to them (see
+[V0.5](#v05)), so everything that needs Linear runs under `op run`.
 
 ## Run the agent
 
@@ -56,14 +59,16 @@ finds there; pick `cycle_runner` in the dropdown.
 
 ```bash
 uv run pytest                          # everything; live tests skip if unavailable
-uv run pytest -m "not ollama and not telegram"   # offline only, no Ollama, no network
+uv run pytest -m "not ollama and not telegram and not linear"   # offline only
 uv run pytest -m ollama                # live round-trips through the local model
-uv run --env-file .env pytest -m telegram        # real Telegram API (needs a token)
+op run --env-file .env -- uv run pytest -m telegram   # real Telegram API
+op run --env-file .env -- uv run pytest -m linear     # real Linear API, read-only
 ```
 
 CI (`.github/workflows/ci.yml`) runs the offline set on every PR and every push
-to `main`. Every test uses its own temporary SQLite file (`tests/conftest.py`),
-so tests never read or change your `data/cycle-runner.db`.
+to `main`. Unless a test is marked `linear`, `tests/conftest.py` removes the
+Linear credentials from its environment, so ordinary tests can't reach Linear.
+The live Ollama tests use `FakeLinear`: a real model with fake Linear data.
 
 Normal `pytest` never needs Telegram credentials. The `telegram` test skips
 unless `TELEGRAM_BOT_TOKEN` is set.
@@ -80,7 +85,9 @@ called the tool) and 5 general ones (0/5 did).
 |---|---|---|
 | `CYCLE_RUNNER_MODEL` | `ollama_chat/gemma4:12b` | LiteLLM model string |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | Where LiteLLM finds Ollama |
-| `CYCLE_RUNNER_DB` | `data/cycle-runner.db` | SQLite file holding the cycle (relative to the working directory) |
+| `LINEAR_CLIENT_ID` | none (required) | Linear app client id, as an `op://` reference in `.env` |
+| `LINEAR_CLIENT_SECRET` | none (required) | Linear app client secret, as an `op://` reference in `.env` |
+| `LINEAR_TEAM_KEY` | `SB` | Team whose active cycle `get_cycle_status` reads |
 | `TELEGRAM_BOT_TOKEN` | none (required for Telegram) | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_USER_IDS` | empty, so nobody is allowed | Comma-separated Telegram user ids allowed to chat |
 
@@ -275,8 +282,11 @@ The bot logs those `Event` lines (`cycle_runner.gateway`) for each message.
 ### Run Cycle Runner through Telegram
 
 ```bash
-uv run --env-file .env python -m cycle_runner
+op run --env-file .env -- uv run python -m cycle_runner
 ```
+
+(Before V0.5 this was `uv run --env-file .env ...`. The bot now needs Linear
+credentials, which `op run` resolves from 1Password.)
 
 Then, in Telegram, open your bot, send `/start`, and chat.
 
@@ -284,7 +294,7 @@ Then, in Telegram, open your bot, send `/start`, and chat.
 
 The automated tests mock Telegram. To check the real thing end to end:
 
-1. `uv run --env-file .env pytest -m telegram` confirms Telegram accepts the token.
+1. `op run --env-file .env -- uv run pytest -m telegram` confirms Telegram accepts the token.
 2. Start the bot, then send these three messages in the same chat:
    1. `What is my role?`: says it's PO/Scrum Master and you're the decision maker.
    2. `What are we working on?`: answers about the Week 39 cycle.
@@ -296,6 +306,10 @@ The automated tests mock Telegram. To check the real thing end to end:
      `function_response`.
 
 ## V0.4
+
+> **Superseded in V0.5.** The SQLite store, bootstrap and demo cycle described
+> below were removed once Linear became the source of truth for cycles and
+> issues. The lesson still stands; the commands in this section no longer exist.
 
 The main question: **where does the agent's conversation end and the
 application's actual state begin?**
@@ -397,25 +411,132 @@ With the single tool, measured with gemma4:12b, 3 runs per question:
 | What is the goal of this cycle? / When does the cycle end? | `get_cycle_status` 6/6 |
 | What is a retrospective? | none 3/3 |
 
+### Restart check (as verified in V0.4)
+
+After a bot restart the agent had forgotten the conversation (the ADK
+session was new and empty) but still reported the same cycle, because the
+tool read it from SQLite. Conversation state is short-term; application state
+lives outside the process.
+
+## V0.5
+
+Read-only access to the team's real work in Linear. The agent now answers
+from the SB team's actual cycle and issues.
+
+### Architecture
+
+```
+Telegram → telegram_adapter → gateway → ADK Runner ──► InMemorySessionService (conversation)
+                                            │
+                                        root_agent   tools=[get_cycle_status, get_issue]
+                                            │
+                                        linear_tools.py   what Cycle Runner asks for, shaped small
+                                            │
+                                        linear_client.py  how Linear is reached: URL, OAuth, HTTP
+                                            │
+                                        Linear (SB team) ──► source of truth for cycles and issues
+```
+
+- **`linear_client.py`** is generic, like `telegram_adapter.py`. It holds the
+  API URL, the OAuth client-credentials token, HTTP, and errors, and it never
+  imports the rest of the package. It's the one file to move out if a second
+  agent ever needs Linear.
+- **`linear_tools.py`** is Cycle Runner's view: which fields matter, how to
+  summarise a cycle, how much to return. The GraphQL text lives here, because
+  deciding *what to ask for* is a Cycle Runner decision. The model never sees
+  it: tool names and docstrings contain no API words, and
+  `tests/test_linear_tools.py` checks that.
+- **`tests/test_boundaries.py`** enforces the split. Only `linear_client.py`
+  imports `httpx` or mentions the API host, OAuth or auth headers, and the
+  generic modules contain no Cycle Runner terms.
+
+### Tools
+
+| Tool | Returns | Notes |
+|---|---|---|
+| `get_cycle_status()` | cycle number, dates, progress %, counts per status, **open** issues (id, title, status, estimate), in-progress ids | Follows pagination. Done and canceled issues are counted but not listed. |
+| `get_issue(issue_id)` | one issue: title, status, estimate, priority, assignee, labels, cycle, description (trimmed to 1500 chars) | The first tool with an argument. ADK builds its parameter schema from `issue_id: str`. |
+
+Both tools are `async def`. ADK awaits async tools, but calls plain `def`
+tools directly on the event loop (`FunctionTool._invoke_callable`), so a
+synchronous network call would freeze the Telegram bot while it waited.
+
+### Identity and read-only access
+
+Cycle Runner talks to Linear as its **own app identity** ("Cycle Runner"),
+not as you. That's a Linear OAuth app using the client-credentials grant: no
+browser, no billable seat, and actions are attributed to the app.
+
+Read-only is enforced in three layers:
+
+1. **Linear:** the token is requested with scope `read`. A write attempt gets
+   `Invalid scope: write or issues:create required` (`FORBIDDEN`), and the
+   `linear` live test proves it.
+2. **Client:** `query()` refuses any document that isn't a query (mutations
+   and subscriptions, even mixed in with a query) before it touches the
+   network. It also refuses a token that comes back with more than `read`.
+3. **Agent:** there are no write tools, and the instruction says so.
+
+### Credentials
+
+The secret never sits in the repo, in plain text on disk, or in front of the
+model.
+
+- The client id and secret live in 1Password (`agents` vault,
+  `cycle-runner-linear-app`).
+- `.env` holds `op://` references, not values. `op run --env-file .env -- …`
+  resolves them into the process environment and masks them in its output.
+- `LinearClient` keeps them out of `repr()` and out of every error message.
+  HTTP failures report the status code only. `httpx` stays at WARNING, so no
+  request URLs or headers are logged.
+- Tools never take or return credentials, and no tool description mentions
+  auth.
+
+### Linear vs SQLite
+
+- **Linear** is the source of truth for engineering work: cycles, issues,
+  statuses. The tools read it live on every call. There is no sync and no
+  cache.
+- **SQLite** is gone for now. The V0.4 demo cycle duplicated what Linear owns,
+  so it was removed. Cycle Runner's own state (decisions, configuration, run
+  history) will come back as its own store when there's something to keep.
+- If Linear can't be reached, the tool returns an error and the agent says the
+  information is unavailable. It never falls back to anything else.
+
+### Context window
+
+Two measurements shaped this milestone:
+
+- **Tool output size.** The real SB cycle had 66 issues. Listing them all is
+  about 16k characters; listing only the 39 open ones is 5.4k. Hence
+  "open issues only".
+- **Ollama's 4096-token default.** Ollama started gemma4 with
+  `-c 4096 --context-shift --keep 4`. A four-question Telegram-style
+  conversation reached 3,902 prompt tokens, and Ollama began silently dropping
+  the *start* of the prompt, where the instruction lives. The next answer
+  skipped the tool and answered from stale history. `agent.py` now asks for
+  `num_ctx=16384` (about +0.2 GB). The same conversation then grew to 5,897
+  tokens intact, with fresh tool calls.
+
+A firmer instruction ("every time the user asks about the cycle or an issue,
+call the tool again before answering") took follow-up questions from
+sometimes stale to 12 of 12 fresh tool calls across three runs.
+
 ### Run it
 
 ```bash
-uv run python -m cycle_runner.bootstrap           # once; safe to repeat
-uv run --env-file .env python -m cycle_runner     # Telegram bot
-uv run adk run src/cycle_runner                   # or the terminal chat
+op run --env-file .env -- uv run python -m cycle_runner   # Telegram bot
+op run --env-file .env -- uv run adk run src/cycle_runner # terminal chat
 ```
 
-`bootstrap` creates the demo cycle (Week 39, `DEMO-1`..`DEMO-4`) only if it
-isn't there, and never overwrites existing records. Delete
-`data/cycle-runner.db` to start over. `data/` and `*.db` are gitignored.
+`.env` needs these lines in addition to the Telegram ones:
 
-### Restart check
+```bash
+LINEAR_CLIENT_ID=op://agents/cycle-runner-linear-app/client_id
+LINEAR_CLIENT_SECRET=op://agents/cycle-runner-linear-app/client_secret
+LINEAR_TEAM_KEY=SB
+```
 
-1. Start the bot and ask "How is the cycle going?". It calls
-   `get_cycle_status` and lists `DEMO-1`..`DEMO-4`.
-2. Stop the bot (Ctrl-C) and start it again.
-3. Ask "What did I just ask you?". The session is new, so it doesn't know.
-   That's the conversation state that was lost.
-4. Ask "How is the cycle going?" again. It gives the same cycle and issues,
-   read from SQLite. That's the application state that survived.
-
+The bot checks the Linear credentials at startup and refuses to start without
+them. Run without `op run`, the references stay unresolved and `LinearClient`
+says so.
