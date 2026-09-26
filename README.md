@@ -13,6 +13,8 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
 - **V0.4**: cycle state in SQLite, surviving restarts. (Superseded by V0.5.)
 - **V0.5**: read-only Linear. `get_cycle_status` and `get_issue` read the SB
   team's real cycle and issues; the SQLite demo layer is gone. See [V0.5](#v05).
+- **V0.6**: "What should we work on next?" gets a read-only recommendation,
+  built from Linear facts and ending with a question. See [V0.6](#v06).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -540,3 +542,77 @@ LINEAR_TEAM_KEY=SB
 The bot checks the Linear credentials at startup and refuses to start without
 them. Run without `op run`, the references stay unresolved and `LinearClient`
 says so.
+
+## V0.6
+
+Cycle Runner can now answer "What should we work on next?" with a
+**recommendation**, not an action. It reads the cycle, weighs the open work,
+offers a few candidates, keeps Linear's facts apart from its own reasoning,
+and asks before anything happens. Nothing is written to Linear.
+
+### No new tool
+
+The existing tools weren't enough. `get_cycle_status` returned only id, title,
+status and estimate, and `get_issue` would have needed one call per issue.
+Instead of adding a tool (which would repeat the issue list, the overlap
+V0.4 removed), `get_cycle_status` now carries the evidence:
+
+| Field | Source | Why it matters |
+|---|---|---|
+| `priority`, `labels` | Linear | urgency and area |
+| `blocked_by` | Linear "blocks" relations, **open blockers only** | a finished blocker no longer blocks; in Cycle 9, 5 of the 9 issues with blocking relations are actually blocked |
+| `age_days` | derived from `createdAt` | the model doesn't know today's date |
+| `cycle.today`, `cycle.days_remaining` | derived | whether a 3-point issue fits the time left |
+| `cycle.goal` | Linear cycle description | `null` for Cycle 9, which makes "no goal set" a fact instead of a guess |
+
+`get_issue` gains `blocked_by` too. Linear has no due dates on these issues,
+and every issue has the same assignee, so neither is reported. The tool still
+does no ranking.
+
+### Where the judgment lives
+
+In the instruction, as factors to weigh rather than a formula: finish
+in-progress work, don't pick work blocked by open issues (consider the
+blocker), fit priority and estimate to the days remaining, and use age and
+labels as supporting evidence. No single factor decides. The reply must:
+
+1. offer two or three candidates, each with **"Linear facts"** (tool values
+   only) and **"Why"** (reasoning);
+2. name exactly one issue under **"My recommendation"**;
+3. say what Linear doesn't record (for example, no cycle goal);
+4. end by asking whether to proceed, without ever claiming to have started,
+   assigned or changed anything.
+
+Tested on the real cycle: the first wording was followed less often with a
+~4.4k-token prompt of real data (the missing goal was mentioned in 1 of 3
+runs, and a single pick named in 0 of 3). The concrete wording ("exactly one
+issue", "if the cycle's goal is null…") took both to 3 of 3. A real
+recommendation takes about 40 seconds on gemma4:12b.
+
+### Why no structured output (yet)
+
+ADK 2.10 supports `output_schema` together with tools, but it forces *every*
+final reply of the agent into that schema. "What is my role?" would come back
+as JSON too, and Telegram would need a rendering layer. Doing it properly
+means a separate recommendation agent, which is multi-agent scope. For now:
+
+- the **facts** are structured: tool output, tested deterministically in
+  `tests/test_linear_tools.py`;
+- the **judgment** is prose, tested structurally in
+  `tests/test_recommendation.py` (live model, fixed fake-Linear scenarios).
+
+Structured output becomes worth it when something *consumes* the
+recommendation, such as an approval step that acts on the chosen issue.
+
+### Tests
+
+- **Deterministic** (`test_linear_tools.py`, in CI): open-vs-closed blockers,
+  non-blocking relations ignored, in-progress-but-blocked reported as both,
+  priority, labels and age, a cycle where everything is blocked, a cycle with
+  no open work, the goal when present, and every request being a read query.
+- **Live** (`test_recommendation.py`, `ollama` marker, not in CI): fresh tool
+  call, "Linear facts" present, a separate recommendation, the blocked
+  issue never picked, "nothing actionable" recognised, the missing goal named,
+  a question at the end, and no mutation sent. Each was run 3 times, all
+  passing.
+
