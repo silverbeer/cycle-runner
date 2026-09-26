@@ -9,6 +9,8 @@ import os
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
+from cycle_runner.tools import get_cycle_status
+
 # LiteLLM model string. The `ollama_chat/` prefix routes through Ollama's
 # /api/chat endpoint; ADK docs warn that plain `ollama/` can loop on tool calls.
 # LiteLLM reaches Ollama at OLLAMA_API_BASE (default http://localhost:11434).
@@ -23,45 +25,24 @@ backlog prioritised, track progress during the week, surface work that is at
 risk, and review what was delivered at the end. The user is the human decision
 maker: you advise, track and recommend; they decide.
 
-You have one tool, get_cycle_status, which returns the current cycle: its name,
-goal, issues with their states, and the issue in focus. Call it whenever an
-answer depends on the current cycle, even if you called it earlier in the
-conversation: the cycle changes during the week, so an earlier result may be
-stale. Never guess or invent cycle names, issues, states or dates; if the tool
-doesn't say it, you don't know it.
+You have one tool, get_cycle_status, which reads the cycle state Cycle Runner
+stores: the cycle's name, goal, status and dates, plus every issue, its status,
+and what's in progress.
 
-When you answer, keep facts from the tool separate from your own opinion or
-advice, so the user can tell which is which.
+Its results are facts about the application. Call it whenever an answer
+depends on the current cycle, even if you called it earlier in the
+conversation: the cycle changes during the week, so an earlier result may be
+stale. Never guess or invent cycle names, goals, dates, issues or statuses; if
+the tool doesn't say it, you don't know it. If the tool returns an error, say
+that cycle state is unavailable instead of guessing.
+
+When you answer, keep facts from the tool separate from your own
+recommendations, so the user can tell which is which.
 
 You can't create or change issues, and you can't do engineering work. If asked
 to, say so plainly and offer to talk it through instead. Keep answers short and
 practical.
 """
-
-
-def get_cycle_status() -> dict:
-    """Get the current state of this week's engineering cycle.
-
-    Use this whenever you need facts about the current cycle: its name or goal,
-    which issues are in it, what state each issue is in, or what the team is
-    focused on right now.
-
-    Returns:
-        dict: The cycle's name and goal, a list of issues (each with id,
-        title and state: Todo, In Progress or Done), and the id of the issue
-        currently in focus.
-    """
-    # Hard-coded sample data; DEMO- ids are deliberately not real Linear ids.
-    # A later version will read this from Linear.
-    return {
-        "cycle": {"name": "Week 39", "goal": "Build the next Cycle Runner milestone"},
-        "issues": [
-            {"id": "DEMO-1", "title": "Build ADK foundation", "state": "Done"},
-            {"id": "DEMO-2", "title": "Add ADK tools", "state": "In Progress"},
-            {"id": "DEMO-3", "title": "Add Telegram interface", "state": "Todo"},
-        ],
-        "current_focus": "DEMO-2",
-    }
 
 
 root_agent = Agent(

@@ -7,7 +7,8 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import InMemoryRunner
 from google.adk.tools import FunctionTool
 
-from cycle_runner.agent import MODEL, get_cycle_status, root_agent
+from cycle_runner.agent import MODEL, root_agent
+from cycle_runner.tools import get_cycle_status
 
 
 def test_root_agent_is_an_llm_agent_named_cycle_runner():
@@ -28,18 +29,8 @@ def test_instruction_sets_role_and_limits():
     assert "one-week" in instruction
     assert "get_cycle_status" in instruction
     assert "Never guess or invent" in instruction
-
-
-def test_get_cycle_status_returns_a_consistent_cycle():
-    status = get_cycle_status()
-
-    assert status["cycle"]["name"]
-    assert status["cycle"]["goal"]
-    assert status["issues"]
-    for issue in status["issues"]:
-        assert issue.keys() == {"id", "title", "state"}
-        assert issue["state"] in {"Todo", "In Progress", "Done"}
-    assert status["current_focus"] in {issue["id"] for issue in status["issues"]}
+    assert "may be\nstale" in instruction
+    assert "cycle state is unavailable" in instruction
 
 
 def test_root_agent_registers_get_cycle_status_and_nothing_else():
@@ -77,21 +68,28 @@ def test_agent_replies_using_local_model(ollama):
     assert reply.strip()
 
 
-@pytest.mark.ollama
-def test_model_chooses_to_call_the_tool_and_uses_its_result(ollama):
-    events = _run_live("What is the status of my cycle?")
-
+def _tool_calls_and_reply(events):
     calls = [call.name for event in events for call in event.get_function_calls()]
-    responses = [
-        response.name
-        for event in events
-        for response in event.get_function_responses()
-    ]
-    assert calls == ["get_cycle_status"]
-    assert responses == ["get_cycle_status"]
-
+    responses = [r.name for event in events for r in event.get_function_responses()]
+    assert calls == responses
     final = events[-1]
     assert final.is_final_response()
-    reply = "".join(part.text for part in final.content.parts if part.text)
+    return calls, "".join(part.text for part in final.content.parts if part.text)
+
+
+@pytest.mark.ollama
+def test_progress_question_uses_get_cycle_status_from_the_store(ollama):
+    calls, reply = _tool_calls_and_reply(_run_live("What is the status of my cycle?"))
+
+    assert calls == ["get_cycle_status"]
     assert "Week 39" in reply
-    assert "DEMO-2" in reply
+    # The in-progress issue, by id or by title: either way it came from the store.
+    assert "DEMO-4" in reply or "Persistent cycle state" in reply
+
+
+@pytest.mark.ollama
+def test_goal_question_also_uses_get_cycle_status(ollama):
+    calls, reply = _tool_calls_and_reply(_run_live("What is the goal of this cycle?"))
+
+    assert calls == ["get_cycle_status"]
+    assert "Build Cycle Runner" in reply
