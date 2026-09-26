@@ -10,6 +10,8 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
   The model decides for itself when to call it. Nothing talks to Linear yet.
 - **V0.3**: Telegram as the human interface, behind a small generic gateway, so
   the Telegram layer carries no Cycle Runner logic. See [V0.3](#v03).
+- **V0.4**: the cycle and its issues live in SQLite and survive restarts. Two
+  domain tools read them. See [V0.4](#v04).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -30,6 +32,7 @@ ollama pull gemma4:12b      # ~7.6 GB
 
 ```bash
 uv sync
+uv run python -m cycle_runner.bootstrap   # create data/cycle-runner.db with the demo cycle
 ```
 
 ## Run the agent
@@ -58,6 +61,10 @@ uv run pytest -m ollama                # live round-trips through the local mode
 uv run --env-file .env pytest -m telegram        # real Telegram API (needs a token)
 ```
 
+CI (`.github/workflows/ci.yml`) runs the offline set on every PR and every push
+to `main`. Every test uses its own temporary SQLite file (`tests/conftest.py`),
+so tests never read or change your `data/cycle-runner.db`.
+
 Normal `pytest` never needs Telegram credentials. The `telegram` test skips
 unless `TELEGRAM_BOT_TOKEN` is set.
 
@@ -73,6 +80,7 @@ called the tool) and 5 general ones (0/5 did).
 |---|---|---|
 | `CYCLE_RUNNER_MODEL` | `ollama_chat/gemma4:12b` | LiteLLM model string |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | Where LiteLLM finds Ollama |
+| `CYCLE_RUNNER_DB` | `data/cycle-runner.db` | SQLite file holding the cycle (relative to the working directory) |
 | `TELEGRAM_BOT_TOKEN` | none (required for Telegram) | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_USER_IDS` | empty, so nobody is allowed | Comma-separated Telegram user ids allowed to chat |
 
@@ -286,4 +294,125 @@ The automated tests mock Telegram. To check the real thing end to end:
      message.
    - Message 3 shows `function_call ['get_cycle_status']` followed by
      `function_response`.
+
+## V0.4
+
+The main question: **where does the agent's conversation end and the
+application's actual state begin?**
+
+### Two kinds of state
+
+| | ADK session state | Cycle Runner application state |
+|---|---|---|
+| What | The conversation: messages, tool calls and replies | The cycle: name, goal, dates, issues, statuses |
+| Owner | ADK (`Runner` + `SessionService`) | Cycle Runner (`CycleStore`) |
+| Storage | `InMemorySessionService`, a dict in the process | SQLite, `data/cycle-runner.db` |
+| Survives restart | **No** | **Yes** |
+| Written by | ADK, automatically, on every turn | `bootstrap.py` today; later, whatever syncs from Linear |
+| The model sees it | Replayed as chat history every turn | Only through tool results |
+| Trust | What was said, which can be stale or wrong | The source of truth |
+
+In short: the session is the agent's short-term memory of a chat, and the
+store is what's actually true about the cycle. If something from the
+conversation disagrees with the store, the store wins. That's why the
+instruction asks for a fresh tool call on every cycle question instead of
+trusting an earlier tool result still sitting in the session history.
+
+### Architecture
+
+```
+Telegram → telegram_adapter.py → gateway.py → ADK Runner ──► SessionService ──► conversation
+                                                   │          (in memory, lost on restart)
+                                                   ▼
+                                          agent.py  root_agent
+                                                   │  tools=[get_current_cycle, get_cycle_status]
+                                                   ▼
+                                          tools.py  domain tools (plain dicts, no storage words)
+                                                   │
+                                                   ▼
+                                          store.py  CycleStore (only module that imports sqlite3)
+                                                   │
+                                                   ▼
+                                          data/cycle-runner.db ──► application state
+                                                                   (on disk, survives restart)
+```
+
+### Schema
+
+```sql
+CREATE TABLE cycles (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    goal       TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+    start_date TEXT NOT NULL,   -- YYYY-MM-DD
+    end_date   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX one_active_cycle ON cycles (status) WHERE status = 'active';
+
+CREATE TABLE issues (
+    id       TEXT PRIMARY KEY,
+    title    TEXT NOT NULL,
+    status   TEXT NOT NULL CHECK (status IN ('todo', 'in_progress', 'done', 'blocked')),
+    cycle_id TEXT NOT NULL REFERENCES cycles (id)
+);
+```
+
+The database itself enforces the rules, not just the code: at most one active
+cycle (so "the current cycle" is never ambiguous), only known statuses, and no
+issue without a real cycle. "Current focus" isn't stored. It's derived from the
+`in_progress` issues.
+
+### How the tools reach application state
+
+- The model gets **domain tools**, not database access. It can ask "what's
+  the current cycle?" but it can't run a query. There is no `run_sql`.
+- Tool names and docstrings never mention storage. The model doesn't know
+  SQLite exists. `tests/test_tools.py` and `tests/test_boundaries.py` check
+  both of these.
+- Each tool call opens the store fresh, so an answer always reflects the file
+  as it is at that moment.
+- `store.py` is the only module that imports `sqlite3`. Moving to Postgres or
+  Linear later means replacing that one file.
+
+### Why two tools
+
+`get_cycle_status` returns everything `get_current_cycle` returns, plus the
+issues. The overlap is deliberate, to see how the model picks between tools
+with neighbouring descriptions. Measured with gemma4:12b, 3 runs per question,
+18 runs in total:
+
+| Question | Tool chosen |
+|---|---|
+| What is the status of my cycle? / How is the cycle going? / What are we working on? | `get_cycle_status` 9/9 |
+| What is the goal of this cycle? / When does the cycle end? | `get_current_cycle` 6/6 |
+| What is a retrospective? | none 3/3 |
+
+The docstrings do the routing: each one says what the tool is for and points
+at the other for everything else. For a cycle this small, `get_cycle_status`
+alone would answer every question. The small tool earns its place once the
+issue list gets long enough that returning it for "when does the cycle end?"
+wastes context.
+
+### Run it
+
+```bash
+uv run python -m cycle_runner.bootstrap           # once; safe to repeat
+uv run --env-file .env python -m cycle_runner     # Telegram bot
+uv run adk run src/cycle_runner                   # or the terminal chat
+```
+
+`bootstrap` creates the demo cycle (Week 39, `DEMO-1`..`DEMO-4`) only if it
+isn't there, and never overwrites existing records. Delete
+`data/cycle-runner.db` to start over. `data/` and `*.db` are gitignored.
+
+### Restart check
+
+1. Start the bot and ask "How is the cycle going?". It calls
+   `get_cycle_status` and lists `DEMO-1`..`DEMO-4`.
+2. Stop the bot (Ctrl-C) and start it again.
+3. Ask "What did I just ask you?". The session is new, so it doesn't know.
+   That's the conversation state that was lost.
+4. Ask "How is the cycle going?" again. It gives the same cycle and issues,
+   read from SQLite. That's the application state that survived.
 

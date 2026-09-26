@@ -41,3 +41,21 @@ def test_generic_modules_do_not_mention_cycle_runner_business_logic(module):
 def test_telegram_adapter_does_not_depend_on_adk():
     imports = _imported_modules(PACKAGE / "telegram_adapter.py")
     assert not any(name.startswith("google") for name in imports), imports
+
+
+def test_only_the_store_knows_about_sqlite():
+    users = [
+        path.name
+        for path in PACKAGE.glob("*.py")
+        if any(name.startswith("sqlite3") for name in _imported_modules(path))
+    ]
+    assert users == ["store.py"]
+
+
+def test_agent_gets_domain_tools_not_database_access():
+    from cycle_runner.agent import root_agent
+
+    for tool in root_agent.tools:
+        for word in ["sql", "query", "database", "execute"]:
+            assert word not in tool.__name__.lower()
+

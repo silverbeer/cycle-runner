@@ -15,3 +15,8 @@ wheels/
 # Local secrets (TELEGRAM_BOT_TOKEN etc.)
 .env
 .env.*
+
+# Cycle Runner application state (local SQLite)
+data/
+*.db
+*.db-journal
