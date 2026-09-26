@@ -11,3 +11,7 @@ wheels/
 
 # ADK local runtime data (adk run/web session store)
 .adk/
+
+# Local secrets (TELEGRAM_BOT_TOKEN etc.)
+.env
+.env.*

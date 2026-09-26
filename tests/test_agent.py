@@ -1,8 +1,5 @@
 import asyncio
 import inspect
-import json
-import os
-import urllib.request
 
 import pytest
 from google.adk.agents import LlmAgent
@@ -61,29 +58,13 @@ def test_tool_declaration_is_built_from_function_name_and_docstring():
     assert declaration.parameters is None
 
 
-def _ollama_has_model() -> bool:
-    base = os.environ.get("OLLAMA_API_BASE", "http://localhost:11434")
-    try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=2) as resp:
-            names = {m["name"] for m in json.load(resp)["models"]}
-    except OSError:
-        return False
-    return MODEL.removeprefix("ollama_chat/") in names
-
-
-needs_ollama = pytest.mark.skipif(
-    not _ollama_has_model(), reason=f"Ollama not serving {MODEL}"
-)
-
-
 def _run_live(message):
     runner = InMemoryRunner(agent=root_agent, app_name="cycle_runner")
     return asyncio.run(runner.run_debug(message, quiet=True))
 
 
 @pytest.mark.ollama
-@needs_ollama
-def test_agent_replies_using_local_model():
+def test_agent_replies_using_local_model(ollama):
     events = _run_live("In one sentence, what is your role?")
 
     reply = "".join(
@@ -97,8 +78,7 @@ def test_agent_replies_using_local_model():
 
 
 @pytest.mark.ollama
-@needs_ollama
-def test_model_chooses_to_call_the_tool_and_uses_its_result():
+def test_model_chooses_to_call_the_tool_and_uses_its_result(ollama):
     events = _run_live("What is the status of my cycle?")
 
     calls = [call.name for event in events for call in event.get_function_calls()]
@@ -114,4 +94,4 @@ def test_model_chooses_to_call_the_tool_and_uses_its_result():
     assert final.is_final_response()
     reply = "".join(part.text for part in final.content.parts if part.text)
     assert "Week 39" in reply
-    assert "SB-2" in reply
+    assert "DEMO-2" in reply

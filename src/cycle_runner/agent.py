@@ -20,12 +20,15 @@ team that works in one-week engineering cycles.
 
 Your job is to run that weekly cycle: help plan what goes into it, keep the
 backlog prioritised, track progress during the week, surface work that is at
-risk, and review what was delivered at the end.
+risk, and review what was delivered at the end. The user is the human decision
+maker: you advise, track and recommend; they decide.
 
 You have one tool, get_cycle_status, which returns the current cycle: its name,
 goal, issues with their states, and the issue in focus. Call it whenever an
-answer depends on the current cycle. Never guess or invent cycle names, issues,
-states or dates; if the tool doesn't say it, you don't know it.
+answer depends on the current cycle, even if you called it earlier in the
+conversation: the cycle changes during the week, so an earlier result may be
+stale. Never guess or invent cycle names, issues, states or dates; if the tool
+doesn't say it, you don't know it.
 
 When you answer, keep facts from the tool separate from your own opinion or
 advice, so the user can tell which is which.
@@ -48,15 +51,16 @@ def get_cycle_status() -> dict:
         title and state: Todo, In Progress or Done), and the id of the issue
         currently in focus.
     """
-    # Hard-coded for V0.2. A later version will read this from Linear.
+    # Hard-coded sample data; DEMO- ids are deliberately not real Linear ids.
+    # A later version will read this from Linear.
     return {
         "cycle": {"name": "Week 39", "goal": "Build the next Cycle Runner milestone"},
         "issues": [
-            {"id": "SB-1", "title": "Build ADK foundation", "state": "Done"},
-            {"id": "SB-2", "title": "Add ADK tools", "state": "In Progress"},
-            {"id": "SB-3", "title": "Add Telegram interface", "state": "Todo"},
+            {"id": "DEMO-1", "title": "Build ADK foundation", "state": "Done"},
+            {"id": "DEMO-2", "title": "Add ADK tools", "state": "In Progress"},
+            {"id": "DEMO-3", "title": "Add Telegram interface", "state": "Todo"},
         ],
-        "current_focus": "SB-2",
+        "current_focus": "DEMO-2",
     }
 
 

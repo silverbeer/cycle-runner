@@ -8,6 +8,8 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
 - **V0.1**: conversation only.
 - **V0.2**: one tool, `get_cycle_status`, which returns hard-coded cycle data.
   The model decides for itself when to call it. Nothing talks to Linear yet.
+- **V0.3**: Telegram as the human interface, behind a small generic gateway, so
+  the Telegram layer carries no Cycle Runner logic. See [V0.3](#v03).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -50,9 +52,14 @@ finds there; pick `cycle_runner` in the dropdown.
 ## Test
 
 ```bash
-uv run pytest            # config + tool tests, and two live tests through Ollama
-uv run pytest -m "not ollama"   # skip the live test
+uv run pytest                          # everything; live tests skip if unavailable
+uv run pytest -m "not ollama and not telegram"   # offline only, no Ollama, no network
+uv run pytest -m ollama                # live round-trips through the local model
+uv run --env-file .env pytest -m telegram        # real Telegram API (needs a token)
 ```
+
+Normal `pytest` never needs Telegram credentials. The `telegram` test skips
+unless `TELEGRAM_BOT_TOKEN` is set.
 
 The live tests (`-m ollama`) skip themselves when Ollama isn't reachable or the
 model isn't pulled. One of them asks "What is the status of my cycle?" and
@@ -66,6 +73,8 @@ called the tool) and 5 general ones (0/5 did).
 |---|---|---|
 | `CYCLE_RUNNER_MODEL` | `ollama_chat/gemma4:12b` | LiteLLM model string |
 | `OLLAMA_API_BASE` | `http://localhost:11434` | Where LiteLLM finds Ollama |
+| `TELEGRAM_BOT_TOKEN` | none (required for Telegram) | Bot token from @BotFather |
+| `TELEGRAM_ALLOWED_USER_IDS` | empty, so nobody is allowed | Comma-separated Telegram user ids allowed to chat |
 
 Use the `ollama_chat/` prefix, not `ollama/`. ADK's docs warn the latter can
 cause infinite tool-call loops.
@@ -106,7 +115,8 @@ connection error.
   *other* agents read when deciding whether to hand work to it.
 - **`root_agent` convention**: `adk run` and `adk web` import
   `<package>.agent` and look for a variable called `root_agent`. That's why
-  `__init__.py` does `from . import agent`, and why there's no `main()`.
+  `__init__.py` does `from . import agent`. (`__main__.py` is only for the
+  Telegram bot; `adk run` doesn't use it.)
 - **Model adapter (`LiteLlm`)**: ADK speaks Gemini natively. Anything else goes
   through a model adapter; `LiteLlm` wraps [LiteLLM](https://docs.litellm.ai),
   which knows how to talk to Ollama.
@@ -132,3 +142,148 @@ connection error.
   ```
 
   `adk web` shows these events in its trace panel.
+
+## V0.3
+
+Telegram becomes the human interface. The main lesson is how a chat app maps
+onto ADK's Runner, SessionService, `user_id`, `session_id` and Events. The
+second lesson is keeping Telegram code free of Cycle Runner logic, so the same
+Telegram layer could later front a different agent.
+
+### Architecture
+
+```
+ Telegram app (your phone)
+        │  Bot API, long polling
+        ▼
+ telegram_adapter.py   TelegramAdapter      Telegram only: token, allowlist,
+        │                                   identity mapping, typing, formatting,
+        │                                   4096-char limit
+        │  handle_message(user_id, session_id, text) -> str
+        ▼
+ gateway.py            AgentGateway         ADK only: session get-or-create,
+        │                                   Runner.run_async, pick final reply
+        ▼
+ ADK Runner  ◄──►  InMemorySessionService   (sessions keyed by app, user, session)
+        │
+        ▼
+ agent.py              root_agent           Cycle Runner only: instruction,
+        │                                   get_cycle_status tool
+        ▼
+ LiteLlm → Ollama → gemma4:12b
+```
+
+Models write Markdown, which Telegram shows as raw `**` and `*`. The adapter
+converts the common parts (bold, italic, code, bullets, headings) to Telegram's
+HTML subset, and resends as plain text if Telegram ever rejects the HTML. That's
+a Telegram concern, so it lives in the adapter, not in the agent's instruction.
+
+`__main__.py` is the only module that imports both sides. It builds the Runner
+around `root_agent` and passes the gateway to the Telegram adapter.
+
+### The reusable boundary
+
+- `telegram_adapter.py` imports neither ADK nor anything from `cycle_runner`.
+  It needs one object with `async handle_message(user_id, session_id, message) -> str`.
+- `gateway.py` imports ADK but not `cycle_runner.agent`. It works with any
+  `Runner`, whatever agent that runner wraps.
+- `agent.py` doesn't know Telegram exists.
+
+`tests/test_boundaries.py` enforces this by reading the source of both generic
+modules. It fails if they import `cycle_runner` or mention `get_cycle_status`,
+`root_agent`, `Scrum`, `Product Owner` or `Linear`, and if the adapter imports
+`google.*`. To put Telegram in front of a different agent, pass that agent's
+Runner in `__main__.py`; the other two modules stay as they are.
+
+### ADK pieces, as used here
+
+- **Runner**: executes one turn: `runner.run_async(user_id=..., session_id=...,
+  new_message=Content)`. It loads the session, appends the user message, runs
+  the agent (model calls, tool calls), appends every resulting event to the
+  session, and yields each one as it happens. It raises if the session doesn't
+  exist, so the gateway gets or creates it first. `Runner(auto_create_session=True)`
+  does the same, but less visibly.
+- **SessionService**: stores sessions. `InMemorySessionService` keeps them in a
+  dict inside the process: fast, nothing to set up, and gone on restart.
+- **Session**: one conversation. It holds `events` (the full history, which ADK
+  replays to the model on every turn) and `state` (unused so far). It's keyed by
+  **(app_name, user_id, session_id)**.
+- **user_id**: who is talking. **session_id**: which conversation this is.
+- **Event**: one step in a turn: model text, a `function_call`, a
+  `function_response`. `event.is_final_response()` marks the one worth showing
+  a human. The gateway logs every event and returns only that final text, with
+  any model reasoning (`part.thought`) removed. Telegram never sees tool calls.
+
+### Telegram identity → ADK identity
+
+| ADK | Value | Example |
+|---|---|---|
+| `app_name` | fixed | `cycle_runner` |
+| `user_id` | `telegram:<update.effective_user.id>` | `telegram:123456789` |
+| `session_id` | `telegram:<update.effective_chat.id>` | `telegram:123456789` |
+
+- In a private chat, Telegram's chat id equals the user id, so the two values
+  match.
+- The same chat always maps to the same `session_id`, so every message in it
+  continues one ADK session for as long as the process runs.
+- A group chat gets its own `session_id`. Because the session key includes
+  `user_id`, each member of the group still has their own session.
+- The `telegram:` prefix keeps these ids from colliding with ids from other
+  interfaces later.
+- Restarting the bot empties `InMemorySessionService`, so the next message
+  starts a new session. Persistence is a later milestone.
+
+### One Telegram message, end to end
+
+```
+you: "How is the cycle going?"
+ → TelegramAdapter.on_message      allowlist check, typing…, map ids
+ → AgentGateway.handle_message     get_session → exists (reused)
+ → Runner.run_async
+     Event author=cycle_runner function_call ['get_cycle_status']
+     Event author=cycle_runner function_response ['get_cycle_status']
+     Event author=cycle_runner text (525 chars) [final]
+ → reply text back to TelegramAdapter
+ → message.reply_text(...)         Markdown → Telegram HTML, split at 4096 chars
+```
+
+The bot logs those `Event` lines (`cycle_runner.gateway`) for each message.
+
+### Configure the bot
+
+1. In Telegram, message **@BotFather**, send `/newbot`, and copy the token.
+   Use a bot of its own: Telegram allows only one poller per bot, so sharing
+   a token with another running program makes them fight over messages.
+2. Create `.env` in the repo root. It's gitignored; never commit it.
+
+   ```bash
+   TELEGRAM_BOT_TOKEN=123456:ABC...
+   TELEGRAM_ALLOWED_USER_IDS=123456789
+   ```
+
+   Don't know your user id? Start the bot with the allowlist empty and send it
+   anything. It replies with your id.
+
+### Run Cycle Runner through Telegram
+
+```bash
+uv run --env-file .env python -m cycle_runner
+```
+
+Then, in Telegram, open your bot, send `/start`, and chat.
+
+### Manual Telegram check
+
+The automated tests mock Telegram. To check the real thing end to end:
+
+1. `uv run --env-file .env pytest -m telegram` confirms Telegram accepts the token.
+2. Start the bot, then send these three messages in the same chat:
+   1. `What is my role?`: says it's PO/Scrum Master and you're the decision maker.
+   2. `What are we working on?`: answers about the Week 39 cycle.
+   3. `How is the cycle going?`: answers from the tool.
+3. In the bot's log:
+   - `session=telegram:<chat id> created` appears exactly once, for the first
+     message.
+   - Message 3 shows `function_call ['get_cycle_status']` followed by
+     `function_response`.
+
