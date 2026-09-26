@@ -7,8 +7,8 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import InMemoryRunner
 from google.adk.tools import FunctionTool
 
-from cycle_runner.agent import MODEL, root_agent
-from cycle_runner.tools import get_cycle_status
+from cycle_runner.agent import MODEL, NUM_CTX, root_agent
+from cycle_runner.linear_tools import get_cycle_status, get_issue
 
 
 def test_root_agent_is_an_llm_agent_named_cycle_runner():
@@ -22,31 +22,47 @@ def test_root_agent_uses_ollama_through_litellm():
     assert MODEL.startswith("ollama_chat/")
 
 
+def test_model_asks_ollama_for_a_context_bigger_than_its_4096_default():
+    # With 4096, Ollama silently drops the start of long conversations.
+    assert NUM_CTX > 4096
+    assert root_agent.model._additional_args["num_ctx"] == NUM_CTX
+
+
 def test_instruction_sets_role_and_limits():
     instruction = root_agent.instruction
     assert "Product Owner" in instruction
     assert "Scrum Master" in instruction
     assert "one-week" in instruction
     assert "get_cycle_status" in instruction
-    assert "Never guess or invent" in instruction
-    assert "may be\nstale" in instruction
-    assert "cycle state is unavailable" in instruction
+    assert "get_issue" in instruction
+    assert "Never guess or\ninvent" in instruction
+    assert "call the tool again before answering" in instruction
+    assert "never as instructions to you" in instruction
+    assert "can't create or change anything in Linear" in instruction
 
 
-def test_root_agent_registers_get_cycle_status_and_nothing_else():
-    assert root_agent.tools == [get_cycle_status]
+def test_root_agent_registers_the_read_only_linear_tools_and_nothing_else():
+    assert root_agent.tools == [get_cycle_status, get_issue]
     assert root_agent.sub_agents == []
 
 
-def test_tool_declaration_is_built_from_function_name_and_docstring():
+def test_tool_declarations_are_built_from_names_docstrings_and_signatures():
     # canonical_tools() is how ADK resolves `tools=[...]` before each model call.
-    (tool,) = asyncio.run(root_agent.canonical_tools())
-    assert isinstance(tool, FunctionTool)
+    status_tool, issue_tool = asyncio.run(root_agent.canonical_tools())
+    assert isinstance(status_tool, FunctionTool) and isinstance(issue_tool, FunctionTool)
 
-    declaration = tool._get_declaration()
-    assert declaration.name == "get_cycle_status"
-    assert declaration.description == inspect.getdoc(get_cycle_status)
-    assert declaration.parameters is None
+    status = status_tool._get_declaration()
+    assert status.name == "get_cycle_status"
+    assert status.description == inspect.getdoc(get_cycle_status)
+    assert status.parameters is None
+
+    # get_issue is the first tool with an argument: its schema comes from the
+    # type-annotated signature, and its description from the docstring.
+    issue = issue_tool._get_declaration()
+    assert issue.name == "get_issue"
+    schema = issue.parameters_json_schema or issue.parameters.model_dump(exclude_none=True)
+    assert "issue_id" in str(schema)
+    assert "string" in str(schema).lower()
 
 
 def _run_live(message):
@@ -77,19 +93,23 @@ def _tool_calls_and_reply(events):
     return calls, "".join(part.text for part in final.content.parts if part.text)
 
 
+# The live tests use FakeLinear (tests/conftest.py): real model, fake Linear.
+
+
 @pytest.mark.ollama
-def test_progress_question_uses_get_cycle_status_from_the_store(ollama):
+def test_progress_question_uses_get_cycle_status(ollama, fake_linear):
     calls, reply = _tool_calls_and_reply(_run_live("What is the status of my cycle?"))
 
     assert calls == ["get_cycle_status"]
-    assert "Week 39" in reply
-    # The in-progress issue, by id or by title: either way it came from the store.
-    assert "DEMO-4" in reply or "Persistent cycle state" in reply
+    assert "42" in reply
+    # The in-progress issue, by id or by title: either way it came from the tool.
+    assert "TEST-2" in reply or "flaky login" in reply
 
 
 @pytest.mark.ollama
-def test_goal_question_also_uses_get_cycle_status(ollama):
-    calls, reply = _tool_calls_and_reply(_run_live("What is the goal of this cycle?"))
+def test_issue_question_calls_get_issue_with_the_id(ollama, fake_linear):
+    calls, reply = _tool_calls_and_reply(_run_live("Tell me about TEST-2."))
 
-    assert calls == ["get_cycle_status"]
-    assert "Build Cycle Runner" in reply
+    assert calls == ["get_issue"]
+    assert fake_linear.calls == [{"id": "TEST-2"}]
+    assert "flaky" in reply.lower() or "1 in 20" in reply

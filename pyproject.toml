@@ -27,4 +27,5 @@ testpaths = ["tests"]
 markers = [
     "ollama: talks to a live local Ollama server (skipped if unreachable)",
     "telegram: talks to the real Telegram API (skipped unless TELEGRAM_BOT_TOKEN is set)",
+    "linear: talks to the real Linear API (skipped unless run under `op run` with Linear credentials)",
 ]

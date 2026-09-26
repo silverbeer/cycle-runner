@@ -6,14 +6,13 @@ gateway to the Telegram adapter.
 """
 
 import logging
-import os
 
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
 from cycle_runner.agent import root_agent
 from cycle_runner.gateway import AgentGateway
-from cycle_runner.store import db_path_from_env
+from cycle_runner.linear_client import LinearClient
 from cycle_runner.telegram_adapter import TelegramConfig, build_application
 
 
@@ -25,6 +24,8 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     config = TelegramConfig.from_env()
+    # Fail at startup, not on the first question, if Linear isn't configured.
+    LinearClient.from_env()
 
     # Sessions live in this process's memory: restart the bot and every
     # conversation starts over.
@@ -36,8 +37,6 @@ def main() -> None:
     application = build_application(config, AgentGateway(runner))
 
     log = logging.getLogger(__name__)
-    # Application state lives here and outlives this process; sessions don't.
-    log.info("cycle store: %s", os.path.abspath(db_path_from_env()))
     log.info("polling Telegram; allowed user ids: %s", sorted(config.allowed_user_ids))
     # drop_pending_updates: ignore messages sent while the bot was down.
     application.run_polling(drop_pending_updates=True)
