@@ -10,8 +10,8 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
   The model decides for itself when to call it. Nothing talks to Linear yet.
 - **V0.3**: Telegram as the human interface, behind a small generic gateway, so
   the Telegram layer carries no Cycle Runner logic. See [V0.3](#v03).
-- **V0.4**: the cycle and its issues live in SQLite and survive restarts. Two
-  domain tools read them. See [V0.4](#v04).
+- **V0.4**: the cycle and its issues live in SQLite and survive restarts. One
+  domain tool, `get_cycle_status`, reads them. See [V0.4](#v04).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -325,7 +325,7 @@ Telegram → telegram_adapter.py → gateway.py → ADK Runner ──► Session
                                                    │          (in memory, lost on restart)
                                                    ▼
                                           agent.py  root_agent
-                                                   │  tools=[get_current_cycle, get_cycle_status]
+                                                   │  tools=[get_cycle_status]
                                                    ▼
                                           tools.py  domain tools (plain dicts, no storage words)
                                                    │
@@ -375,24 +375,27 @@ issue without a real cycle. "Current focus" isn't stored. It's derived from the
 - `store.py` is the only module that imports `sqlite3`. Moving to Postgres or
   Linear later means replacing that one file.
 
-### Why two tools
+### One cycle-level tool
 
-`get_cycle_status` returns everything `get_current_cycle` returns, plus the
-issues. The overlap is deliberate, to see how the model picks between tools
-with neighbouring descriptions. Measured with gemma4:12b, 3 runs per question,
-18 runs in total:
+The agent has a single domain tool, `get_cycle_status`. It returns the cycle's
+details (name, goal, dates) together with its issues and progress, and its
+docstring covers every kind of question about the current cycle.
+
+The first V0.4 draft also had `get_current_cycle`, which returned the cycle
+details only. The model told the two apart perfectly (progress questions went
+to `get_cycle_status` 9/9, goal and date questions to `get_current_cycle`
+6/6), but that isn't a reason to keep both: `get_cycle_status` already
+contained everything the smaller tool returned. It was removed so that each
+tool exposes a distinct capability. Overlapping tools make the model choose
+between near-duplicates and give you two things to keep consistent.
+
+With the single tool, measured with gemma4:12b, 3 runs per question:
 
 | Question | Tool chosen |
 |---|---|
-| What is the status of my cycle? / How is the cycle going? / What are we working on? | `get_cycle_status` 9/9 |
-| What is the goal of this cycle? / When does the cycle end? | `get_current_cycle` 6/6 |
+| How is the cycle going? | `get_cycle_status` 3/3 |
+| What is the goal of this cycle? / When does the cycle end? | `get_cycle_status` 6/6 |
 | What is a retrospective? | none 3/3 |
-
-The docstrings do the routing: each one says what the tool is for and points
-at the other for everything else. For a cycle this small, `get_cycle_status`
-alone would answer every question. The small tool earns its place once the
-issue list gets long enough that returning it for "when does the cycle end?"
-wastes context.
 
 ### Run it
 

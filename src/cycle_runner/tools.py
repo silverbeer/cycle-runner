@@ -14,32 +14,19 @@ from cycle_runner.store import Cycle, CycleStore, db_path_from_env
 NO_ACTIVE_CYCLE = {"error": "There is no active cycle. Cycle state is unavailable."}
 
 
-def get_current_cycle() -> dict:
-    """Get the current cycle's basic details: its name, goal, status and dates.
-
-    Use this for questions about the cycle itself, such as what it's called,
-    what its goal is, or when it starts or ends. It does not include issues or
-    progress; use get_cycle_status for those.
-
-    Returns:
-        dict: id, name, goal, status, start_date and end_date (YYYY-MM-DD), or
-        an "error" key if there is no active cycle.
-    """
-    cycle = CycleStore(db_path_from_env()).get_active_cycle()
-    return _cycle_dict(cycle) if cycle else NO_ACTIVE_CYCLE
-
-
 def get_cycle_status() -> dict:
-    """Get the current cycle's progress: its details plus every issue and its status.
+    """Get the current cycle: its details plus every issue and its status.
 
-    Use this for questions about how the cycle is going, what the team is
-    working on, what's done or blocked, or what to focus on.
+    Use this for any question about the current cycle: its name, goal or dates,
+    how it's going, what the team is working on, what's done or blocked, or
+    what to focus on.
 
     Returns:
-        dict: "cycle" (same fields as get_current_cycle), "issues" (each with
-        id, title and status: todo, in_progress, done or blocked), "counts"
-        (number of issues per status) and "in_progress" (ids of the issues being
-        worked on now). Or an "error" key if there is no active cycle.
+        dict: "cycle" (id, name, goal, status, start_date and end_date as
+        YYYY-MM-DD), "issues" (each with id, title and status: todo,
+        in_progress, done or blocked), "counts" (number of issues per status)
+        and "in_progress" (ids of the issues being worked on now). Or an
+        "error" key if there is no active cycle.
     """
     store = CycleStore(db_path_from_env())
     cycle = store.get_active_cycle()

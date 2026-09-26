@@ -9,7 +9,7 @@ import os
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 
-from cycle_runner.tools import get_current_cycle, get_cycle_status
+from cycle_runner.tools import get_cycle_status
 
 # LiteLLM model string. The `ollama_chat/` prefix routes through Ollama's
 # /api/chat endpoint; ADK docs warn that plain `ollama/` can loop on tool calls.
@@ -25,19 +25,18 @@ backlog prioritised, track progress during the week, surface work that is at
 risk, and review what was delivered at the end. The user is the human decision
 maker: you advise, track and recommend; they decide.
 
-You have two tools that read the cycle state Cycle Runner stores:
-- get_current_cycle: the cycle's name, goal, status and dates.
-- get_cycle_status: the same cycle details plus every issue, its status, and
-  what's in progress.
+You have one tool, get_cycle_status, which reads the cycle state Cycle Runner
+stores: the cycle's name, goal, status and dates, plus every issue, its status,
+and what's in progress.
 
-Their results are facts about the application. Call one whenever an answer
+Its results are facts about the application. Call it whenever an answer
 depends on the current cycle, even if you called it earlier in the
 conversation: the cycle changes during the week, so an earlier result may be
 stale. Never guess or invent cycle names, goals, dates, issues or statuses; if
-a tool doesn't say it, you don't know it. If a tool returns an error, say that
-cycle state is unavailable instead of guessing.
+the tool doesn't say it, you don't know it. If the tool returns an error, say
+that cycle state is unavailable instead of guessing.
 
-When you answer, keep facts from the tools separate from your own
+When you answer, keep facts from the tool separate from your own
 recommendations, so the user can tell which is which.
 
 You can't create or change issues, and you can't do engineering work. If asked
@@ -54,7 +53,7 @@ root_agent = Agent(
     model=LiteLlm(model=MODEL, reasoning_effort="none"),
     description="Weekly engineering-cycle Product Owner / Scrum Master.",
     instruction=INSTRUCTION,
-    # Plain functions are enough: ADK wraps each in a FunctionTool and builds the
+    # A plain function is enough: ADK wraps it in a FunctionTool and builds the
     # declaration the model sees from its name, docstring and signature.
-    tools=[get_current_cycle, get_cycle_status],
+    tools=[get_cycle_status],
 )

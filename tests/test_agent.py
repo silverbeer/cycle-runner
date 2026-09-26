@@ -8,7 +8,7 @@ from google.adk.runners import InMemoryRunner
 from google.adk.tools import FunctionTool
 
 from cycle_runner.agent import MODEL, root_agent
-from cycle_runner.tools import get_current_cycle, get_cycle_status
+from cycle_runner.tools import get_cycle_status
 
 
 def test_root_agent_is_an_llm_agent_named_cycle_runner():
@@ -27,28 +27,26 @@ def test_instruction_sets_role_and_limits():
     assert "Product Owner" in instruction
     assert "Scrum Master" in instruction
     assert "one-week" in instruction
-    assert "get_current_cycle" in instruction
     assert "get_cycle_status" in instruction
     assert "Never guess or invent" in instruction
     assert "may be\nstale" in instruction
     assert "cycle state is unavailable" in instruction
 
 
-def test_root_agent_registers_the_two_domain_tools_and_nothing_else():
-    assert root_agent.tools == [get_current_cycle, get_cycle_status]
+def test_root_agent_registers_get_cycle_status_and_nothing_else():
+    assert root_agent.tools == [get_cycle_status]
     assert root_agent.sub_agents == []
 
 
-def test_tool_declarations_are_built_from_function_names_and_docstrings():
+def test_tool_declaration_is_built_from_function_name_and_docstring():
     # canonical_tools() is how ADK resolves `tools=[...]` before each model call.
-    tools = asyncio.run(root_agent.canonical_tools())
+    (tool,) = asyncio.run(root_agent.canonical_tools())
+    assert isinstance(tool, FunctionTool)
 
-    for tool, function in zip(tools, [get_current_cycle, get_cycle_status], strict=True):
-        assert isinstance(tool, FunctionTool)
-        declaration = tool._get_declaration()
-        assert declaration.name == function.__name__
-        assert declaration.description == inspect.getdoc(function)
-        assert declaration.parameters is None
+    declaration = tool._get_declaration()
+    assert declaration.name == "get_cycle_status"
+    assert declaration.description == inspect.getdoc(get_cycle_status)
+    assert declaration.parameters is None
 
 
 def _run_live(message):
@@ -85,12 +83,13 @@ def test_progress_question_uses_get_cycle_status_from_the_store(ollama):
 
     assert calls == ["get_cycle_status"]
     assert "Week 39" in reply
-    assert "DEMO-4" in reply
+    # The in-progress issue, by id or by title: either way it came from the store.
+    assert "DEMO-4" in reply or "Persistent cycle state" in reply
 
 
 @pytest.mark.ollama
-def test_goal_question_uses_get_current_cycle(ollama):
+def test_goal_question_also_uses_get_cycle_status(ollama):
     calls, reply = _tool_calls_and_reply(_run_live("What is the goal of this cycle?"))
 
-    assert calls == ["get_current_cycle"]
+    assert calls == ["get_cycle_status"]
     assert "Build Cycle Runner" in reply
