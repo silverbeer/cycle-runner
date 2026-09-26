@@ -1,6 +1,7 @@
 import json
 import os
 import urllib.request
+from datetime import date
 
 import pytest
 
@@ -44,11 +45,31 @@ FAKE_CYCLE = {
     "endsAt": "2030-01-13T05:00:00.000Z",
     "progress": 0.5,
 }
+def fake_issue(identifier, title, state, state_type, estimate=1, priority="No priority",
+               created="2030-01-01", labels=(), blocked_by=()):
+    """One issue node as the cycle query returns it. blocked_by: (id, state_type) pairs."""
+    return {
+        "identifier": identifier,
+        "title": title,
+        "estimate": estimate,
+        "priorityLabel": priority,
+        "createdAt": f"{created}T12:00:00.000Z",
+        "state": {"name": state, "type": state_type},
+        "labels": {"nodes": [{"name": name} for name in labels]},
+        "inverseRelations": {
+            "nodes": [
+                {"type": "blocks", "issue": {"identifier": blocker, "state": {"type": blocker_type}}}
+                for blocker, blocker_type in blocked_by
+            ]
+        },
+    }
+
+
 FAKE_ISSUES = [
-    {"identifier": "TEST-1", "title": "Ship the widget", "estimate": 3, "state": {"name": "Done", "type": "completed"}},
-    {"identifier": "TEST-2", "title": "Fix the flaky login", "estimate": 2, "state": {"name": "In Progress", "type": "started"}},
-    {"identifier": "TEST-3", "title": "Write the release notes", "estimate": 1, "state": {"name": "Todo", "type": "unstarted"}},
-    {"identifier": "TEST-4", "title": "Old idea", "estimate": None, "state": {"name": "Canceled", "type": "canceled"}},
+    fake_issue("TEST-1", "Ship the widget", "Done", "completed", estimate=3),
+    fake_issue("TEST-2", "Fix the flaky login", "In Progress", "started", estimate=2, priority="High"),
+    fake_issue("TEST-3", "Write the release notes", "Todo", "unstarted", priority="Medium"),
+    fake_issue("TEST-4", "Old idea", "Canceled", "canceled", estimate=None),
 ]
 FAKE_ISSUE = {
     "identifier": "TEST-2",
@@ -60,6 +81,7 @@ FAKE_ISSUE = {
     "assignee": {"name": "Pat Example"},
     "labels": {"nodes": [{"name": "bug"}]},
     "cycle": {"number": 42.0},
+    "inverseRelations": {"nodes": []},
 }
 
 
@@ -68,10 +90,12 @@ class FakeLinear:
 
     def __init__(self, cycle=FAKE_CYCLE, issues=FAKE_ISSUES, issue=FAKE_ISSUE, page_size=50):
         self.cycle, self.issues, self.issue, self.page_size = cycle, issues, issue, page_size
-        self.calls = []
+        self.calls = []  # variables of each request
+        self.documents = []  # GraphQL text of each request
 
     async def query(self, document, variables=None):
         self.calls.append(variables)
+        self.documents.append(document)
         if "activeCycle" in document:
             if self.cycle is None:
                 return {"teams": {"nodes": [{"activeCycle": None}]}}
@@ -94,6 +118,12 @@ class FakeLinear:
                 }
             }
         return {"issue": self.issue}
+
+
+@pytest.fixture(autouse=True)
+def fixed_today(monkeypatch):
+    """Pin "today" so ages and days remaining are deterministic: 2030-01-10."""
+    monkeypatch.setattr(linear_tools, "_today", lambda: date(2030, 1, 10))
 
 
 @pytest.fixture
