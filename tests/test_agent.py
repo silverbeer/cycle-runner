@@ -41,6 +41,16 @@ def test_instruction_sets_role_and_limits():
     assert "can't create or change anything in Linear" in instruction
 
 
+def test_instruction_makes_next_work_a_recommendation_not_an_action():
+    instruction = root_agent.instruction
+    assert "recommend; never act" in instruction
+    assert '"Linear facts"' in instruction
+    assert '"My recommendation"' in instruction
+    assert "No single factor decides" in instruction
+    assert "asking whether the user wants to proceed" in instruction
+    assert "Never claim you have\n   started, assigned or changed anything" in instruction
+
+
 def test_root_agent_registers_the_read_only_linear_tools_and_nothing_else():
     assert root_agent.tools == [get_cycle_status, get_issue]
     assert root_agent.sub_agents == []

@@ -32,6 +32,7 @@ query ($team: String!, $after: String) {
       activeCycle {
         number
         name
+        description
         startsAt
         endsAt
         progress
@@ -99,8 +100,8 @@ async def get_cycle_status() -> dict:
     to work on next.
 
     Returns:
-        dict: "cycle" (number, name, start_date, end_date, today, all as
-        YYYY-MM-DD, days_remaining, progress_percent), "counts" (number of
+        dict: "cycle" (number, name, goal (null if none was set), start_date,
+        end_date, today, all as YYYY-MM-DD, days_remaining, progress_percent), "counts" (number of
         issues per status, all issues), "open_issues" (every issue not yet done
         or canceled, each with id, title, status, estimate, priority, labels,
         age_days, and blocked_by: ids of open issues blocking it) and
@@ -122,6 +123,7 @@ async def get_cycle_status() -> dict:
         "cycle": {
             "number": int(cycle["number"]),
             "name": cycle["name"] or f"Cycle {int(cycle['number'])}",
+            "goal": cycle["description"],
             "start_date": cycle["startsAt"][:10],
             "end_date": cycle["endsAt"][:10],
             "today": today.isoformat(),

@@ -41,6 +41,7 @@ def no_real_linear(request, monkeypatch):
 FAKE_CYCLE = {
     "number": 42.0,
     "name": None,
+    "description": None,
     "startsAt": "2030-01-06T05:00:00.000Z",
     "endsAt": "2030-01-13T05:00:00.000Z",
     "progress": 0.5,

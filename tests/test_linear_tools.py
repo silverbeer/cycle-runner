@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+import conftest
 from conftest import FAKE_ISSUE, FakeLinear, fake_issue
 from cycle_runner import linear_tools
 from cycle_runner.linear_client import LinearError
@@ -18,6 +19,7 @@ def test_cycle_status_summarises_the_active_cycle(fake_linear):
     assert status["cycle"] == {
         "number": 42,
         "name": "Cycle 42",
+        "goal": None,
         "start_date": "2030-01-06",
         "end_date": "2030-01-13",
         "today": "2030-01-10",
@@ -75,6 +77,12 @@ def _status_with(monkeypatch, issues):
 
 def _open(status, issue_id):
     return next(i for i in status["open_issues"] if i["id"] == issue_id)
+
+
+def test_cycle_goal_is_reported_when_linear_has_one(monkeypatch):
+    fake = FakeLinear(cycle={**conftest.FAKE_CYCLE, "description": "Ship v2"})
+    monkeypatch.setattr(linear_tools, "_client", lambda: fake)
+    assert asyncio.run(get_cycle_status())["cycle"]["goal"] == "Ship v2"
 
 
 def test_only_open_blockers_count_as_blocking(monkeypatch):
