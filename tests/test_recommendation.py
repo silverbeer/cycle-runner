@@ -1,4 +1,4 @@
-"""Live checks of the "what should we work on next?" behaviour.
+"""Live checks of the "what should we work on next?" behaviour, and of approving it.
 
 Real model (Ollama), fake Linear (fixed scenarios from conftest). The model's
 exact words vary run to run, so these assert only the structure the
@@ -16,6 +16,8 @@ from google.adk.runners import InMemoryRunner
 from conftest import FakeLinear, fake_issue
 from cycle_runner import linear_tools
 from cycle_runner.agent import root_agent
+from cycle_runner.approval import APPROVED_KEY
+from cycle_runner.recommendation import PENDING_KEY, RECOMMENDER_NAME
 
 pytestmark = pytest.mark.ollama
 
@@ -38,14 +40,32 @@ NOTHING_ACTIONABLE = [
 ]
 
 
-def _ask_next(monkeypatch, issues):
+def _ask(runner, text):
+    events = asyncio.run(runner.run_debug(text, quiet=True))
+    calls = [call.name for event in events for call in event.get_function_calls()]
+    finals = [e for e in events if e.is_final_response() and e.content and e.content.parts]
+    return calls, "".join(part.text or "" for part in finals[-1].content.parts)
+
+
+def _state(runner):
+    session = asyncio.run(
+        runner.session_service.get_session(
+            app_name="cycle_runner", user_id="debug_user_id", session_id="debug_session_id"
+        )
+    )
+    return session.state
+
+
+def _ask_next(monkeypatch, issues, runner=None):
     fake = FakeLinear(issues=issues)
     monkeypatch.setattr(linear_tools, "_client", lambda: fake)
-    runner = InMemoryRunner(agent=root_agent, app_name="cycle_runner")
-    events = asyncio.run(runner.run_debug("What should we work on next?", quiet=True))
-    calls = [call.name for event in events for call in event.get_function_calls()]
-    reply = "".join(part.text or "" for part in events[-1].content.parts)
-    return fake, calls, reply
+    runner = runner or InMemoryRunner(agent=root_agent, app_name="cycle_runner")
+    calls, reply = _ask(runner, "What should we work on next?")
+    # The root agent delegates; the recommender's own get_cycle_status read shows
+    # up in fake Linear's request log, not in the root agent's events.
+    assert calls == [RECOMMENDER_NAME]
+    assert any("activeCycle" in document for document in fake.documents)
+    return fake, runner, reply
 
 
 def _picked(reply):
@@ -62,9 +82,8 @@ def _assert_read_only(fake):
 
 
 def test_recommends_from_fresh_facts_and_keeps_them_apart(ollama, monkeypatch):
-    fake, calls, reply = _ask_next(monkeypatch, ACTIONABLE)
+    fake, _, reply = _ask_next(monkeypatch, ACTIONABLE)
 
-    assert calls == ["get_cycle_status"]
     assert "linear facts" in reply.lower()
     assert _picked(reply) in {"TEST-2", "TEST-3"}
     assert reply.rstrip().endswith("?")
@@ -72,16 +91,17 @@ def test_recommends_from_fresh_facts_and_keeps_them_apart(ollama, monkeypatch):
 
 
 def test_does_not_pick_work_that_is_blocked(ollama, monkeypatch):
-    _, _, reply = _ask_next(monkeypatch, ACTIONABLE)
+    _, runner, reply = _ask_next(monkeypatch, ACTIONABLE)
 
     assert _picked(reply) != "TEST-5"
+    assert _state(runner)[PENDING_KEY]["recommendation"]["recommended_issue_id"] != "TEST-5"
 
 
 def test_says_so_when_nothing_is_actionable(ollama, monkeypatch):
-    fake, calls, reply = _ask_next(monkeypatch, NOTHING_ACTIONABLE)
+    fake, runner, reply = _ask_next(monkeypatch, NOTHING_ACTIONABLE)
 
-    assert calls == ["get_cycle_status"]
     assert "blocked" in reply.lower()
+    assert _state(runner).get(PENDING_KEY) is None  # nothing to approve
     assert reply.rstrip().endswith("?")
     _assert_read_only(fake)
 
@@ -90,3 +110,34 @@ def test_names_the_missing_cycle_goal_instead_of_inventing_one(ollama, monkeypat
     _, _, reply = _ask_next(monkeypatch, ACTIONABLE)
 
     assert "goal" in reply.lower()
+
+
+def test_explicit_approval_of_a_live_recommendation_is_recorded(ollama, monkeypatch):
+    _, runner, _ = _ask_next(monkeypatch, ACTIONABLE)
+    pick = _state(runner)[PENDING_KEY]["recommendation"]["recommended_issue_id"]
+
+    calls, reply = _ask(runner, "Yes, proceed")
+
+    assert calls == []  # decided by code, no model or tool involved
+    assert _state(runner)[APPROVED_KEY]["issue_id"] == pick
+    assert reply.startswith(f"Approved. I have recorded your approval for {pick}")
+
+
+def test_soft_reply_to_a_live_recommendation_is_not_approval(ollama, monkeypatch):
+    _, runner, _ = _ask_next(monkeypatch, ACTIONABLE)
+
+    _, reply = _ask(runner, "Sounds good")
+
+    assert APPROVED_KEY not in _state(runner)
+    assert 'reply "approve"' in reply
+
+
+def test_normal_question_after_a_recommendation_is_answered_normally(ollama, monkeypatch):
+    fake, runner, _ = _ask_next(monkeypatch, ACTIONABLE)
+
+    calls, reply = _ask(runner, "What is my role?")
+
+    assert calls == [] and reply.strip()
+    assert not reply.startswith(("Approved", "Not approved", "To approve"))
+    assert APPROVED_KEY not in _state(runner)
+

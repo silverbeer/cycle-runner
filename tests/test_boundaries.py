@@ -73,5 +73,15 @@ def test_agent_gets_domain_tools_not_raw_request_access():
     from cycle_runner.agent import root_agent
 
     for tool in root_agent.tools:
+        name = getattr(tool, "__name__", None) or tool.name
         for word in ["sql", "graphql", "query", "execute", "request", "http"]:
-            assert word not in tool.__name__.lower()
+            assert word not in name.lower()
+
+
+def test_approval_and_recommendation_cannot_reach_linear_or_start_processes():
+    # V0.7 records approvals only. Nothing in these modules may talk to Linear
+    # directly or launch anything.
+    for module in ["approval.py", "recommendation.py"]:
+        imports = _imported_modules(PACKAGE / module)
+        forbidden = {"httpx", "subprocess", "cycle_runner.linear_client", "os", "multiprocessing"}
+        assert not imports & forbidden, (module, imports & forbidden)
