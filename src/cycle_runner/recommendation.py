@@ -4,16 +4,25 @@ The recommender is a small ADK agent with an output_schema. The root agent
 calls it through AgentTool, so the conversation stays with the root agent
 and only this one step is forced into a schema.
 
+Code, not the recommender, reads the cycle: a before_tool_callback calls
+get_cycle_status and puts the result in session state, and the recommender's
+instruction receives it through ADK's {state_key} templating. With no tools,
+ADK passes the schema to the model as a response format, which Ollama enforces
+while decoding. (With tools, ADK has to fall back to a set_model_response tool
+call, and gemma4:12b produced unparseable, empty or wrong-key output in about
+a fifth of runs.)
+
 Facts and judgment are kept apart by construction:
 - the recommender model writes only RecommenderOutput: which issues, why, and
   what it couldn't know;
 - code then builds the stored Recommendation, copying titles and facts from
-  the get_cycle_status result the recommender actually saw, and rejecting
-  anything that isn't an open, unblocked issue of that cycle.
+  the same cycle data, and never passing on a pick that isn't an open,
+  unblocked issue of that cycle.
 
 Nothing here writes to Linear or starts any work.
 """
 
+import logging
 from typing import Any
 
 from google.adk.agents import Agent
@@ -22,6 +31,8 @@ from google.adk.tools import BaseTool, ToolContext
 from pydantic import BaseModel, Field
 
 from cycle_runner.linear_tools import get_cycle_status
+
+log = logging.getLogger(__name__)
 
 RECOMMENDER_NAME = "recommend_next_work"
 EVIDENCE_KEY = "recommender_evidence"
@@ -33,7 +44,7 @@ PENDING_KEY = "pending_recommendation"
 
 
 class CandidateChoice(BaseModel):
-    issue_id: str = Field(description="An open issue id from get_cycle_status, like SB-123.")
+    issue_id: str = Field(description="An open issue id from the cycle, like SB-123.")
     rationale: str = Field(description="Why this issue: your reasoning, not a restatement of facts.")
 
 
@@ -73,6 +84,7 @@ class Recommendation(BaseModel):
     candidates: list[Candidate]
     recommended_issue_id: str | None
     blocked: dict[str, list[str]]  # open issue -> the open issues blocking it (from Linear)
+    corrections: list[str]  # where code overruled the recommender, and why
     unknowns: list[str]
     approval_question: str
 
@@ -84,8 +96,10 @@ class RecommendationRejected(Exception):
 # --- the recommender agent ----------------------------------------------------
 
 INSTRUCTION = """\
-You choose what a one-week engineering team should work on next. Call
-get_cycle_status once, then answer with the structured result.
+You choose what a one-week engineering team should work on next. This is the
+current cycle, as read from Linear:
+
+{recommender_evidence}
 
 Weigh the open issues. No single factor decides:
 - In progress: finishing started work usually beats starting new work.
@@ -96,32 +110,14 @@ Weigh the open issues. No single factor decides:
 
 Give up to three candidates, each an open, unblocked issue id with your
 rationale. If nothing is actionable, give no candidates.
+
+Answer with exactly these keys: "candidates" (a list of objects with
+"issue_id" and "rationale"), "recommended_issue_id", and "unknowns".
 recommended_issue_id must be exactly one of your candidates' ids, or null if
 nothing is actionable. List in unknowns what the cycle data doesn't record
 that would matter; if the cycle's goal is null, say the cycle has no goal set.
-Use only ids that appear in the tool result.
+Use only ids that appear in the cycle above.
 """
-
-
-def capture_evidence(
-    tool: BaseTool, args: dict[str, Any], tool_context: ToolContext, tool_response: Any
-) -> None:
-    """Remember what the recommender saw, so its output can be checked against it.
-
-    AgentTool forwards this state change from the recommender's own session
-    into the caller's session.
-    """
-    if tool.name != "get_cycle_status" or not isinstance(tool_response, dict):
-        return None
-    if "error" in tool_response:
-        tool_context.state[EVIDENCE_KEY] = {"error": tool_response["error"]}
-        return None
-    tool_context.state[EVIDENCE_KEY] = {
-        "cycle_number": tool_response["cycle"]["number"],
-        "cycle_goal": tool_response["cycle"]["goal"],
-        "open_issues": {issue["id"]: issue for issue in tool_response["open_issues"]},
-    }
-    return None
 
 
 def build_recommender(model: BaseLlm | str) -> Agent:
@@ -132,35 +128,35 @@ def build_recommender(model: BaseLlm | str) -> Agent:
             "Recommends what the team should work on next in the current cycle. "
             "Use it whenever the user asks what to work on or pick up next."
         ),
-        instruction=INSTRUCTION,
-        tools=[get_cycle_status],
+        instruction=INSTRUCTION,  # {recommender_evidence} is filled from session state
         output_schema=RecommenderOutput,
         output_key=OUTPUT_KEY,
-        after_tool_callback=capture_evidence,
     )
 
 
 # --- validation and rendering -------------------------------------------------
 
 
-def build_recommendation(output: dict[str, Any], evidence: dict[str, Any] | None) -> Recommendation:
+def build_recommendation(output: dict[str, Any], cycle: dict[str, Any] | None) -> Recommendation:
     """Turn the recommender's decision into a Recommendation backed by Linear facts.
 
-    Raises RecommendationRejected if the decision can't be trusted.
+    cycle is the get_cycle_status result the recommender was given.
+    Raises RecommendationRejected if there are no facts to check it against.
     """
-    if not evidence:
-        raise RecommendationRejected("the recommender did not read the cycle")
-    if "error" in evidence:
-        raise RecommendationRejected(evidence["error"])
+    if not cycle:
+        raise RecommendationRejected("the cycle was not read")
+    if "error" in cycle:
+        raise RecommendationRejected(cycle["error"])
 
     decision = RecommenderOutput.model_validate(output)
-    open_issues = evidence["open_issues"]
+    open_issues = {issue["id"]: issue for issue in cycle["open_issues"]}
 
-    candidates = []
+    candidates, corrections = [], []
     for choice in decision.candidates:
         issue = open_issues.get(choice.issue_id)
-        if issue is None or issue["blocked_by"]:
-            continue  # not an open issue of this cycle, or blocked: never offered
+        if problem := _not_offerable(choice.issue_id, issue):
+            corrections.append(f"{choice.issue_id} was suggested, but {problem}, so it isn't offered.")
+            continue
         candidates.append(
             Candidate(
                 issue_id=choice.issue_id,
@@ -178,16 +174,18 @@ def build_recommendation(output: dict[str, Any], evidence: dict[str, Any] | None
 
     pick = decision.recommended_issue_id
     if pick is not None and pick not in {candidate.issue_id for candidate in candidates}:
-        raise RecommendationRejected(
-            f"the recommended issue {pick} is not an open, unblocked candidate in this cycle"
-        )
+        # Never pass on a pick that isn't an open, unblocked candidate. Say so instead.
+        problem = _not_offerable(pick, open_issues.get(pick)) or "it wasn't among the candidates"
+        corrections = [c for c in corrections if not c.startswith(f"{pick} ")]
+        corrections.append(f"{pick} was picked, but {problem}, so it isn't recommended.")
+        pick = None
 
     unknowns = list(decision.unknowns)
-    if evidence["cycle_goal"] is None and not any("goal" in u.lower() for u in unknowns):
+    if cycle["cycle"]["goal"] is None and not any("goal" in u.lower() for u in unknowns):
         unknowns.append("The cycle has no goal set in Linear.")
 
     return Recommendation(
-        cycle_number=evidence["cycle_number"],
+        cycle_number=cycle["cycle"]["number"],
         candidates=candidates,
         recommended_issue_id=pick,
         blocked={
@@ -195,6 +193,7 @@ def build_recommendation(output: dict[str, Any], evidence: dict[str, Any] | None
             for issue_id, issue in open_issues.items()
             if issue["blocked_by"]
         },
+        corrections=corrections,
         unknowns=unknowns,
         approval_question=(
             f'Reply "approve" or "yes, proceed" to approve it. Do you want to proceed with {pick}?'
@@ -202,6 +201,15 @@ def build_recommendation(output: dict[str, Any], evidence: dict[str, Any] | None
             else "Do you want me to look into what is blocking this work?"
         ),
     )
+
+
+def _not_offerable(issue_id: str, issue: dict | None) -> str | None:
+    """Why an issue can't be offered, from Linear's facts, or None if it can."""
+    if issue is None:
+        return "it isn't an open issue in this cycle"
+    if issue["blocked_by"]:
+        return f"Linear shows it blocked by {', '.join(issue['blocked_by'])}"
+    return None
 
 
 def render(recommendation: Recommendation) -> str:
@@ -224,6 +232,8 @@ def render(recommendation: Recommendation) -> str:
         lines.append(f"My recommendation: {recommendation.recommended_issue_id}.")
     else:
         lines.append("My recommendation: nothing is actionable right now.")
+    if recommendation.corrections:
+        lines += ["", "Corrected by Cycle Runner:"] + [f"- {c}" for c in recommendation.corrections]
     if recommendation.blocked:
         lines += ["", "Not considered, blocked by open work (Linear facts):"] + [
             f"- {issue_id}, blocked by {', '.join(blockers)}"
@@ -250,10 +260,23 @@ def _estimate(value: float | None) -> str:
 TURN_KEY = "turn"
 
 
-def clear_evidence(tool: BaseTool, args: dict[str, Any], tool_context: ToolContext) -> None:
-    """Before each recommendation, forget what an earlier run saw."""
-    if tool.name == RECOMMENDER_NAME:
-        tool_context.state[EVIDENCE_KEY] = None
+async def read_cycle_for_recommender(
+    tool: BaseTool, args: dict[str, Any], tool_context: ToolContext
+) -> dict | None:
+    """Before the recommender runs, read the cycle and hand it over via session state.
+
+    AgentTool copies the caller's state into the recommender's session, where
+    {recommender_evidence} in its instruction picks it up. The same data is
+    later used to check the recommender's answer.
+    """
+    if tool.name != RECOMMENDER_NAME:
+        return None
+    # A new recommendation always replaces the previous pending one, even if it fails.
+    tool_context.state[PENDING_KEY] = None
+    cycle = await get_cycle_status()
+    tool_context.state[EVIDENCE_KEY] = cycle
+    if "error" in cycle:
+        return {"message": _unavailable(cycle["error"])}  # skips the recommender entirely
     return None
 
 
@@ -263,10 +286,15 @@ def store_recommendation(
     """Validate the recommender's output and make it the pending recommendation."""
     if tool.name != RECOMMENDER_NAME:
         return None
-    # A new recommendation always replaces the previous pending one, even if it fails.
-    tool_context.state[PENDING_KEY] = None
-    if not isinstance(tool_response, dict):
-        return {"message": _unavailable(f"the recommender answered in the wrong shape ({tool_response!r:.80})")}
+    if isinstance(tool_response, dict) and "message" in tool_response:
+        return None  # already a final message (the cycle couldn't be read)
+    # A real RecommenderOutput always has "candidates" (possibly empty). Anything
+    # else is a failure: when the recommender's run fails, AgentTool returns its
+    # error text, which ADK wraps as {"result": "..."}. Treating that as valid
+    # output would turn a failure into "nothing is actionable".
+    if not isinstance(tool_response, dict) or "candidates" not in tool_response:
+        log.warning("recommender output rejected: %.300r", tool_response)
+        return {"message": _unavailable("the recommender's answer didn't match the expected structure")}
     try:
         recommendation = build_recommendation(tool_response, tool_context.state.get(EVIDENCE_KEY))
     except (RecommendationRejected, ValueError) as exc:
@@ -310,4 +338,4 @@ def present_recommendation(callback_context, llm_request) -> Any:
 
 
 def _unavailable(reason: str) -> str:
-    return f"I couldn't produce a recommendation: {reason}. Nothing is pending approval."
+    return f"I couldn't produce a recommendation: {reason.rstrip('.')}. Nothing is pending approval."
