@@ -852,4 +852,9 @@ agent / recommender / tools / gateway / Telegram ──╳─► work_requests.p
 - **Several pending requests for one issue** are possible (see Idempotency).
 - **Nothing reads work requests yet**, including the user: there's no "what's
   approved?" question. That's deliberate until something acts on them.
+- **A bare "yes" with nothing pending goes to the model.** After a restart,
+  "Yes, proceed" was answered with a cycle summary. It's harmless, since
+  nothing was created, but confusing. V0.7 deliberately lets the model handle
+  "yes" when nothing is pending, so that "yes" can still answer the model's
+  own questions. Worth revisiting.
 
