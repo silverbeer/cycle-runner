@@ -16,6 +16,7 @@ counted but not listed, and descriptions are trimmed.
 import functools
 import os
 import re
+from datetime import UTC, date, datetime
 
 from cycle_runner.linear_client import LinearClient, LinearError
 
@@ -31,12 +32,18 @@ query ($team: String!, $after: String) {
       activeCycle {
         number
         name
+        description
         startsAt
         endsAt
         progress
         issues(first: 50, after: $after) {
           pageInfo { hasNextPage endCursor }
-          nodes { identifier title estimate state { name type } }
+          nodes {
+            identifier title estimate priorityLabel createdAt
+            state { name type }
+            labels { nodes { name } }
+            inverseRelations { nodes { type issue { identifier state { type } } } }
+          }
         }
       }
     }
@@ -56,6 +63,7 @@ query ($id: String!) {
     assignee { name }
     labels { nodes { name } }
     cycle { number }
+    inverseRelations { nodes { type issue { identifier state { type } } } }
   }
 }
 """
@@ -70,18 +78,35 @@ def _team_key() -> str:
     return os.environ.get("LINEAR_TEAM_KEY", "SB")
 
 
+def _today() -> date:
+    return datetime.now(UTC).date()
+
+
+def _open_blockers(issue: dict) -> list[str]:
+    """Ids of still-open issues that block this one. A finished blocker no longer blocks."""
+    return [
+        relation["issue"]["identifier"]
+        for relation in issue["inverseRelations"]["nodes"]
+        if relation["type"] == "blocks"
+        and relation["issue"]["state"]["type"] not in CLOSED_STATE_TYPES
+    ]
+
+
 async def get_cycle_status() -> dict:
     """Get the team's current cycle: its dates and progress, and the work still open in it.
 
     Use this for any question about the current cycle: which cycle it is, when
-    it ends, how it's going, what the team is working on, or what's left.
+    it ends, how it's going, what the team is working on, what's left, or what
+    to work on next.
 
     Returns:
-        dict: "cycle" (number, name, start_date, end_date as YYYY-MM-DD,
-        progress_percent), "counts" (number of issues per status, all issues),
-        "open_issues" (every issue not yet done or canceled, each with id,
-        title, status and estimate) and "in_progress" (ids of issues being
-        worked on now). Or an "error" key if the cycle can't be read.
+        dict: "cycle" (number, name, goal (null if none was set), start_date,
+        end_date, today, all as YYYY-MM-DD, days_remaining, progress_percent), "counts" (number of
+        issues per status, all issues), "open_issues" (every issue not yet done
+        or canceled, each with id, title, status, estimate, priority, labels,
+        age_days, and blocked_by: ids of open issues blocking it) and
+        "in_progress" (ids of issues being worked on now). Or an "error" key if
+        the cycle can't be read.
     """
     try:
         cycle, issues = await _active_cycle_with_issues()
@@ -90,6 +115,7 @@ async def get_cycle_status() -> dict:
     if cycle is None:
         return {"error": "The team has no active cycle."}
 
+    today = _today()
     counts: dict[str, int] = {}
     for issue in issues:
         counts[issue["state"]["name"]] = counts.get(issue["state"]["name"], 0) + 1
@@ -97,8 +123,11 @@ async def get_cycle_status() -> dict:
         "cycle": {
             "number": int(cycle["number"]),
             "name": cycle["name"] or f"Cycle {int(cycle['number'])}",
+            "goal": cycle["description"],
             "start_date": cycle["startsAt"][:10],
             "end_date": cycle["endsAt"][:10],
+            "today": today.isoformat(),
+            "days_remaining": (date.fromisoformat(cycle["endsAt"][:10]) - today).days,
             "progress_percent": round(cycle["progress"] * 100),
         },
         "counts": counts,
@@ -108,6 +137,10 @@ async def get_cycle_status() -> dict:
                 "title": issue["title"],
                 "status": issue["state"]["name"],
                 "estimate": issue["estimate"],
+                "priority": issue["priorityLabel"],
+                "labels": [label["name"] for label in issue["labels"]["nodes"]],
+                "age_days": (today - date.fromisoformat(issue["createdAt"][:10])).days,
+                "blocked_by": _open_blockers(issue),
             }
             for issue in issues
             if issue["state"]["type"] not in CLOSED_STATE_TYPES
@@ -129,8 +162,9 @@ async def get_issue(issue_id: str) -> dict:
 
     Returns:
         dict: id, title, status, estimate, priority, assignee, labels, cycle
-        (number) and description (possibly shortened, see
-        "description_truncated"). Or an "error" key if the issue can't be read.
+        (number), blocked_by (ids of open issues blocking it) and description
+        (possibly shortened, see "description_truncated"). Or an "error" key if
+        the issue can't be read.
     """
     issue_id = issue_id.strip().upper()
     if not ISSUE_ID.match(issue_id):
@@ -151,6 +185,7 @@ async def get_issue(issue_id: str) -> dict:
         "assignee": (issue["assignee"] or {}).get("name"),
         "labels": [label["name"] for label in issue["labels"]["nodes"]],
         "cycle": int(issue["cycle"]["number"]) if issue["cycle"] else None,
+        "blocked_by": _open_blockers(issue),
         "description": description[:DESCRIPTION_LIMIT],
         "description_truncated": len(description) > DESCRIPTION_LIMIT,
     }
