@@ -102,16 +102,17 @@ def test_the_store_knows_nothing_about_adk_telegram_linear_or_the_rest_of_the_ap
     ), imports
 
 
-def test_only_approval_can_reach_the_work_request_store():
+def test_only_approval_and_the_executor_can_reach_the_work_request_store():
     # The agent, the recommender, the tools, the gateway and Telegram can't
-    # create (or read) work requests; only the deterministic approval code can.
+    # create, read or change work requests. Approval creates them (V0.8); the
+    # executor claims and runs them (V0.9).
     users = [
         path.name
         for path in _modules()
         if path.name != "work_requests.py"
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
-    assert users == ["approval.py"]
+    assert sorted(users) == ["approval.py", "executor.py", "fake_executor.py"]
 
 
 @pytest.mark.parametrize(
@@ -133,3 +134,40 @@ def test_the_agent_has_no_tool_that_touches_work_requests():
 
     names = [getattr(tool, "__name__", None) or tool.name for tool in root_agent.tools]
     assert names == ["get_cycle_status", "get_issue", "recommend_next_work"]
+
+
+# --- V0.9: the executor stands alone ------------------------------------------
+
+
+@pytest.mark.parametrize("module", ["executor.py", "fake_executor.py", "work_requests.py"])
+def test_execution_modules_cannot_reach_adk_telegram_linear_or_the_conversation(module):
+    imports = _imported_modules(PACKAGE / module)
+    forbidden = (
+        "google", "telegram", "httpx", "litellm",
+        "cycle_runner.agent", "cycle_runner.gateway", "cycle_runner.telegram_adapter",
+        "cycle_runner.linear_client", "cycle_runner.linear_tools",
+        "cycle_runner.recommendation", "cycle_runner.approval",
+    )
+    assert not [name for name in imports if name.startswith(forbidden)], (module, imports)
+
+
+def test_the_fake_executor_depends_only_on_the_executor_interface_and_the_work_request_model():
+    imports = _imported_modules(PACKAGE / "fake_executor.py")
+    assert imports == {"cycle_runner.executor", "cycle_runner.work_requests"}
+
+
+def test_only_the_executor_cli_knows_which_executor_exists():
+    users = [path.name for path in _modules() if "cycle_runner.fake_executor" in _imported_modules(path)]
+    assert users == ["executor.py"]
+
+
+def test_the_conversation_side_cannot_start_execution():
+    users = [path.name for path in _modules() if "cycle_runner.executor" in _imported_modules(path)]
+    assert users == ["fake_executor.py"]  # the interface; nothing in the Telegram/ADK path imports it
+
+
+def test_importing_the_package_does_not_load_adk():
+    # cycle_runner/__init__.py must stay empty, or every "independent" module
+    # would drag ADK in with it.
+    assert (PACKAGE / "__init__.py").read_text().strip().startswith('"""')
+    assert _imported_modules(PACKAGE / "__init__.py") == set()
