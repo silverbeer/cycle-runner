@@ -39,8 +39,10 @@ class AgentGateway:
             user_id=user_id, session_id=session_id, new_message=new_message
         ):
             log.info("session=%s %s", session_id, describe_event(event))
-            if event.is_final_response():
-                reply = final_text(event)
+            # A callback that only changes state still yields a "final" event with
+            # no content, so keep the last final event that actually has text.
+            if event.is_final_response() and (text := final_text(event)):
+                reply = text
         return reply
 
     async def _get_or_create_session(self, user_id: str, session_id: str) -> None:

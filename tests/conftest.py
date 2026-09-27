@@ -133,3 +133,38 @@ def fake_linear(monkeypatch):
     fake = FakeLinear()
     monkeypatch.setattr(linear_tools, "_client", lambda: fake)
     return fake
+
+
+# --- a scripted model, for deterministic end-to-end ADK tests -----------------
+
+from google.adk.models import BaseLlm, LlmResponse  # noqa: E402
+from google.genai import types  # noqa: E402
+
+
+class ScriptedLlm(BaseLlm):
+    """A BaseLlm that replies from a fixed script, in order, and records every request.
+
+    Root agent and recommender share one instance, so the script lists every
+    model call of a turn in the order ADK makes them. Running out of script
+    fails the test: an unexpected extra model call is a bug.
+    """
+
+    model: str = "scripted"
+    script: list = []
+    requests: list = []
+
+    async def generate_content_async(self, llm_request, stream=False):
+        self.requests.append(llm_request)
+        if not self.script:
+            raise AssertionError("unexpected model call: the script is empty")
+        yield self.script.pop(0)
+
+
+def say(text):
+    return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=text)]))
+
+
+def call(name, **args):
+    return LlmResponse(
+        content=types.Content(role="model", parts=[types.Part(function_call=types.FunctionCall(name=name, args=args))])
+    )

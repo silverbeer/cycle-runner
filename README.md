@@ -15,6 +15,9 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
   team's real cycle and issues; the SQLite demo layer is gone. See [V0.5](#v05).
 - **V0.6**: "What should we work on next?" gets a read-only recommendation,
   built from Linear facts and ending with a question. See [V0.6](#v06).
+- **V0.7**: recommendations are structured (Pydantic) and can be explicitly
+  approved. Approval is recorded in the session; nothing is executed yet. See
+  [V0.7](#v07).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -615,4 +618,131 @@ recommendation, such as an approval step that acts on the chosen issue.
   issue never picked, "nothing actionable" recognised, the missing goal named,
   a question at the end, and no mutation sent. Each was run 3 times, all
   passing.
+
+## V0.7
+
+The recommendation becomes data, and "yes" becomes a recorded, checked
+approval of that data. Nothing is executed: V0.7 ends at
+*recommendation → explicit approval → recorded approval*.
+
+### Architecture
+
+```
+Telegram → gateway → Runner → root_agent (conversational)
+                                │ before_agent_callback  approval_gate: decides approval in code, before the model
+                                │ tools: get_cycle_status, get_issue, AgentTool(recommend_next_work)
+                                │
+                                │ before_tool_callback   read the cycle (get_cycle_status) into session state
+                                ▼
+                    recommend_next_work (LlmAgent, no tools)
+                        instruction has {recommender_evidence}  ← filled from session state
+                        output_schema=RecommenderOutput         ← enforced by Ollama while decoding
+                        output_key=recommender_output
+                                │
+                                │ after_tool_callback    validate against the same cycle data → Recommendation
+                                │ before_model_callback  show the stored Recommendation as text (no model call)
+                                ▼
+                         session state: pending_recommendation → approved_work_item
+```
+
+New modules: `recommendation.py` (models, recommender, validation, rendering)
+and `approval.py` (reply classification, approval gate). Telegram, the gateway
+(apart from one fix) and the Linear modules are untouched.
+
+### Why AgentTool, not a sub-agent
+
+ADK's runner gives the next turn to whichever agent replied last. With a
+sub-agent, the recommender (and its schema) would answer "Yes, proceed" as
+JSON. `AgentTool` runs the recommender as a tool call and returns its
+validated output, so the root agent keeps the conversation. It also forwards
+the child's state changes (its `output_key`) into the caller's session.
+
+### Why the recommender has no tools
+
+With tools, ADK 2.10 can only enforce `output_schema` through an extra
+`set_model_response` tool call, because LiteLLM reports
+`output_schema_and_tools=False`. That was measured with gemma4:12b first:
+
+| Recommender | Valid output | Time |
+|---|---|---|
+| with `get_cycle_status` as a tool (`set_model_response`) | 6/10 first try, 2/10 after a retry, 2/10 empty; Ollama also failed with HTTP 500 when it couldn't parse nested tool-call JSON | 8–17s |
+| **no tools, cycle passed through state, native schema** | **10/10** | **4–13s** |
+
+So code reads the cycle and hands it over through ADK's `{state_key}`
+instruction templating, and the schema becomes a response format that Ollama
+enforces while decoding.
+
+### Facts versus judgment, by construction
+
+```python
+class RecommenderOutput(BaseModel):     # all the model writes
+    candidates: list[CandidateChoice]   # issue_id + rationale, up to 3
+    recommended_issue_id: str | None
+    unknowns: list[str]
+
+class Recommendation(BaseModel):        # what is stored, shown and approved
+    cycle_number: int
+    candidates: list[Candidate]         # issue_id, title*, facts*, rationale
+    recommended_issue_id: str | None
+    blocked: dict[str, list[str]]       # *
+    corrections: list[str]              # where code overruled the model
+    unknowns: list[str]                 # plus "no goal set" when Linear has none*
+    approval_question: str
+```
+
+Fields marked * are filled by code from the same cycle data, never by the
+model. A pick that isn't an open, unblocked issue of the cycle is never
+passed on. It becomes "no pick" with a visible correction; with every issue
+blocked, gemma picked a blocked issue in 3 of 3 runs, and the correction
+caught it every time.
+
+### What you see is what gets approved
+
+The stored `Recommendation` is rendered by code (`render()`), and a
+`before_model_callback` returns that text as the reply, so the root model
+never paraphrases it. That's also why V0.7 is faster: on real Cycle 9 the
+recommendation path went from about 42s (V0.6) to about 20s.
+
+### Approval rules
+
+`approval_gate` runs before the model on every message:
+
+| Situation | Reply | State |
+|---|---|---|
+| Explicit reply right after a recommendation ("yes", "yes, proceed", "go ahead", "do it", "approve", "approve SB-123") | "Approved. I have recorded your approval for SB-123 … No action has been taken yet." | `approved_work_item` set, pending cleared |
+| "approve SB-999" when SB-123 is pending | "Not approved: the pending recommendation is SB-123…" | nothing recorded |
+| Soft reply right after ("sounds good", "ok", "makes sense") | asks for "approve" or "yes, proceed" | still pending for the next reply |
+| Anything else ("tell me more", "interesting", a new question) | answered by the model as usual | the recommendation is stale from the next message |
+| Explicit reply after the conversation moved on | "Not approved: the recommendation for SB-123 is no longer pending…" | nothing recorded, stale item cleared |
+| Explicit reply with nothing pending | answered by the model, which can't approve anything | nothing recorded |
+| A new recommendation | replaces the pending one, even if it fails | |
+
+"Pending" means: shown on turn *n*, and valid only for turn *n+1*. The model
+never decides approval, and approval never touches Linear or starts work;
+`tests/test_boundaries.py` checks that neither module can reach Linear or
+launch processes.
+
+Session state holds `turn`, `recommender_evidence`, `recommender_output`,
+`pending_recommendation` and `approved_work_item`. It's in memory: a restart
+forgets pending and approved items, which is fine while approval causes no
+action.
+
+### Tests
+
+- **Deterministic, with a scripted model** (`tests/test_approval.py`):
+  `ScriptedLlm` is a `BaseLlm` that replies from a script, so the real
+  Runner, AgentTool, callbacks, templating and session state run with no
+  Ollama at all. Covered: the recommendation stored in state, the shown text
+  equal to the stored model, the recommender receiving the cycle with no tools
+  and a schema, a blocked pick corrected, a recommender that ignores the
+  schema, an unreadable cycle, replacement by a new recommendation, explicit,
+  mismatched, soft, stale and no-pending approvals, approval making no model,
+  tool or Linear call, and normal questions unaffected.
+- **Deterministic, pure** (`tests/test_recommender.py`): model validity,
+  facts from Linear rather than the model, blocked picks and candidates,
+  unknown ids, the missing goal, nothing actionable, ADK's `exclude_none`,
+  failed runs not mistaken for "nothing actionable", and rendering.
+- **Live** (`tests/test_recommendation.py`, `ollama` marker): structure,
+  blocked work not picked, nothing actionable, approving a live
+  recommendation, soft replies, and normal questions after a recommendation.
 

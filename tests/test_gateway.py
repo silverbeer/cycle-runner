@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from google.adk.events import Event
+from google.adk.events import Event, EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -99,6 +99,16 @@ def test_different_session_ids_get_different_sessions():
     asyncio.run(two_chats())
 
     assert sorted(_session_ids(runner, "u1")) == ["chat-a", "chat-b"]
+
+
+def test_state_only_final_events_do_not_blank_the_reply():
+    state_only = Event(author="fake_agent", actions=EventActions(state_delta={"turn": 2}))
+    events = [TOOL_TURN[2], state_only]
+    assert state_only.is_final_response() and state_only.content is None
+
+    reply = asyncio.run(AgentGateway(FakeRunner(events)).handle_message("u", "s", "hi"))
+
+    assert reply == "Thing is 1."
 
 
 def test_returns_empty_string_when_agent_has_no_final_text():
