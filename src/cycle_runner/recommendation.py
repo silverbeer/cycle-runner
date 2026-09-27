@@ -26,8 +26,9 @@ import logging
 from typing import Any
 
 from google.adk.agents import Agent
-from google.adk.models import BaseLlm
+from google.adk.models import BaseLlm, LlmResponse
 from google.adk.tools import BaseTool, ToolContext
+from google.genai import types
 from pydantic import BaseModel, Field
 
 from cycle_runner.linear_tools import get_cycle_status
@@ -317,24 +318,36 @@ def recommender_failed(
     return {"message": _unavailable(f"the recommender's answer didn't validate ({type(error).__name__})")}
 
 
-def present_recommendation(callback_context, llm_request) -> Any:
-    """Right after the recommender returns, reply with its rendered text: no model call.
+def present_recommendation(callback_context, llm_request) -> LlmResponse | None:
+    """before_model_callback: right after the recommender returns, answer without the model.
 
-    What the user reads is then exactly what was stored and can be approved.
+    Why this bypass is required: without it, the root model would read the
+    recommender's result and write its own reply. It could paraphrase the
+    candidates, drop the corrections, or even name a different issue, and then
+    what the user reads would no longer match the stored Recommendation that
+    "yes" approves. Replying with render()'s text guarantees that the user sees
+    exactly what can be approved. (It also saves a model call: about 20s.)
+
+    Every other model call goes ahead untouched.
     """
-    from google.adk.models import LlmResponse
-    from google.genai import types
+    message = _rendered_recommendation(llm_request)
+    return _reply_without_model(message) if message else None
 
+
+def _rendered_recommendation(llm_request) -> str | None:
+    """The rendered text, if the latest content is the recommender tool's result."""
     if not llm_request.contents:
         return None
-    last = llm_request.contents[-1]
-    for part in last.parts or []:
+    for part in llm_request.contents[-1].parts or []:
         response = part.function_response
         if response is not None and response.name == RECOMMENDER_NAME:
-            message = (response.response or {}).get("message")
-            if message:
-                return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=message)]))
+            return (response.response or {}).get("message")
     return None
+
+
+def _reply_without_model(text: str) -> LlmResponse:
+    """A model response that no model produced. The only place this module fakes one."""
+    return LlmResponse(content=types.Content(role="model", parts=[types.Part(text=text)]))
 
 
 def _unavailable(reason: str) -> str:
