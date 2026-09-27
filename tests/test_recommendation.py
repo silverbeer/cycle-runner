@@ -17,6 +17,7 @@ from conftest import FakeLinear, fake_issue
 from cycle_runner import linear_tools
 from cycle_runner.agent import root_agent
 from cycle_runner.approval import APPROVED_KEY
+from cycle_runner.work_requests import open_store
 from cycle_runner.recommendation import PENDING_KEY, RECOMMENDER_NAME
 
 pytestmark = pytest.mark.ollama
@@ -120,7 +121,9 @@ def test_explicit_approval_of_a_live_recommendation_is_recorded(ollama, monkeypa
 
     assert calls == []  # decided by code, no model or tool involved
     assert _state(runner)[APPROVED_KEY]["issue_id"] == pick
-    assert reply.startswith(f"Approved. I have recorded your approval for {pick}")
+    assert reply.startswith(f"Approved {pick}. Work request WR-000001 created.")
+    (request,) = open_store().list_all()
+    assert (request.issue_id, request.status) == (pick, "pending")
 
 
 def test_soft_reply_to_a_live_recommendation_is_not_approval(ollama, monkeypatch):

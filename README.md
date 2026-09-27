@@ -18,6 +18,8 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
 - **V0.7**: recommendations are structured (Pydantic) and can be explicitly
   approved. Approval is recorded in the session; nothing is executed yet. See
   [V0.7](#v07).
+- **V0.8**: an approval creates a durable work request (`WR-000001`, pending)
+  in SQLite that survives restarts. Still nothing executes. See [V0.8](#v08).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -93,6 +95,7 @@ called the tool) and 5 general ones (0/5 did).
 | `LINEAR_CLIENT_ID` | none (required) | Linear app client id, as an `op://` reference in `.env` |
 | `LINEAR_CLIENT_SECRET` | none (required) | Linear app client secret, as an `op://` reference in `.env` |
 | `LINEAR_TEAM_KEY` | `SB` | Team whose active cycle `get_cycle_status` reads |
+| `CYCLE_RUNNER_DB` | `data/cycle-runner.db` | SQLite file holding work requests (gitignored) |
 | `TELEGRAM_BOT_TOKEN` | none (required for Telegram) | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_USER_IDS` | empty, so nobody is allowed | Comma-separated Telegram user ids allowed to chat |
 
@@ -756,4 +759,102 @@ action.
   that block a candidate).
 - **Approvals live in session memory.** A restart forgets pending and
   approved items. That's acceptable while approval executes nothing. It has
-  to change before an approved item can trigger work.
+  to change before an approved item can trigger work. *(Resolved in V0.8: an
+  approval creates a durable work request.)*
+
+## V0.8
+
+Approving a recommendation now creates a **durable work request**: Cycle
+Runner's record that a human approved an issue for agent execution. It
+survives process, Telegram and session restarts. Nothing consumes it yet.
+
+```
+"Yes, proceed"
+   → approval_gate (deterministic, before the model)
+   → validate the pending recommendation (next message, matching id)
+   → WorkRequestStore.create_for_approval(...)      ← the only new side effect
+   → "Approved SB-1234. Work request WR-000001 created. No work has been started."
+```
+
+### Two sources of truth
+
+| | Linear | Work-request store |
+|---|---|---|
+| Owns | engineering work: the issue, title, status, priority, labels, cycle | Cycle Runner's execution intent: "a human approved SB-1234 for agent execution" |
+| Written by | people (Cycle Runner only reads it) | `approval.py`, and nothing else |
+| Storage | Linear | SQLite, `data/cycle-runner.db` (gitignored) |
+
+The store does **not** copy the Linear issue. V0.9 will re-read the issue from
+Linear when it picks a request up.
+
+### The WorkRequest
+
+| Field | Why |
+|---|---|
+| `work_request_id` | `WR-000001`: an AUTOINCREMENT row, never reused, not the Linear id. One issue can have several requests over its lifetime. |
+| `recommendation_id` | a UUID given to each recommendation; **UNIQUE**, which makes approval idempotent |
+| `issue_id` | the Linear issue to work on |
+| `status` | `pending`, the only value the database accepts (`CHECK`), because there's no executor yet |
+| `approved_by` | the ADK `user_id` (`telegram:<user id>`) |
+| `approved_at` | UTC |
+| `cycle_number`, `title_at_approval`, `rationale` | a snapshot of what the human saw when approving |
+
+Deliberately not stored: Linear's current status, priority, estimate, labels,
+description or blockers (Linear is authoritative), the other candidates, the
+conversation, and a separate `created_at` (it would equal `approved_at`).
+
+### Why SQLite (again)
+
+V0.5 removed SQLite because it was duplicating Linear. This is different data
+that Linear doesn't hold, and it's operational state: small, local,
+single-writer, and needing transactions and a uniqueness constraint. SQLite
+provides exactly that with no new dependency. `work_requests.py` is the only
+module that imports `sqlite3`, and it imports nothing from ADK, Telegram,
+Linear or the rest of the app.
+
+### Idempotency
+
+"The same approval processed twice" can mean a double-tapped "yes", a
+retried Telegram update, or a crash after the write but before the session
+update. All of them hit the same `recommendation_id`:
+
+- **The database guarantees it:** `UNIQUE(recommendation_id)` with
+  `INSERT … ON CONFLICT DO NOTHING`, then read back the one row.
+- **The conversation says so:** a repeat "yes" right after an approval gets
+  "Already approved: SB-1234 is work request WR-000001, still pending. No new
+  work request was created."
+- **If the write fails**, nothing is approved and the recommendation stays
+  pending for one retry.
+
+A *new* recommendation that picks the same issue is a new approval and a new
+request (`WR-000002`). Whether that should be refused while an earlier request
+for the issue is still pending is a V0.9 decision, once "pending" can end.
+
+### Restart
+
+The conversation is still in memory, so pending recommendations are forgotten
+on restart. Work requests are not. The tests restart with a new Runner, a new
+session service and a new store object on the same file, and check from a
+separate OS process that `WR-000001` is still there and still pending. A "yes"
+after a restart finds nothing pending and creates nothing.
+
+### Boundaries (checked by tests)
+
+```
+approval.py ──► work_requests.py ──► SQLite        the only new side effect
+approval.py ──╳─► model, ADK agents, Linear, Telegram, subprocess, coding agents
+agent / recommender / tools / gateway / Telegram ──╳─► work_requests.py
+```
+
+### Open concerns for V0.9
+
+- **Blocked-issue list is long** (carried over from V0.7).
+- **Several pending requests for one issue** are possible (see Idempotency).
+- **Nothing reads work requests yet**, including the user: there's no "what's
+  approved?" question. That's deliberate until something acts on them.
+- **A bare "yes" with nothing pending goes to the model.** After a restart,
+  "Yes, proceed" was answered with a cycle summary. It's harmless, since
+  nothing was created, but confusing. V0.7 deliberately lets the model handle
+  "yes" when nothing is pending, so that "yes" can still answer the model's
+  own questions. Worth revisiting.
+
