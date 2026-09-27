@@ -78,12 +78,13 @@ def test_a_new_recommendation_of_the_same_issue_is_a_new_request(store):
     assert first.issue_id == second.issue_id
 
 
-def test_pending_is_the_only_status_the_database_accepts(store):
-    with sqlite3.connect(store.path) as db, pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+@pytest.mark.parametrize(("status", "error"), [("running", "must be pending"), ("paused", "must be pending")])
+def test_a_new_request_can_only_start_as_pending(store, status, error):
+    # V0.9 allows more statuses, but a new row still has to start at the beginning.
+    with sqlite3.connect(store.path) as db, pytest.raises(sqlite3.IntegrityError, match=error):
         db.execute(
             "INSERT INTO work_requests (recommendation_id, issue_id, status, approved_by, approved_at,"
-            " cycle_number, title_at_approval, rationale)"
-            " VALUES ('r', 'SB-1', 'running', 'x', 'x', 1, 'x', 'x')"
+            f" cycle_number, title_at_approval, rationale) VALUES ('r', 'SB-1', '{status}', 'x', 'x', 1, 'x', 'x')"
         )
 
 
