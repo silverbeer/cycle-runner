@@ -4,11 +4,23 @@ This runs as the root agent's before_agent_callback, ahead of the model, on
 every user message. Approval is decided here, by code, never by the model:
 
 - A recommendation is pending only for the very next user message after it
-  was shown. Anything else in between makes it stale.
+  was shown. Anything else in between makes it stale. This is intentional: a
+  "yes" is only unambiguous as the direct answer to "Do you want to proceed
+  with SB-123?". The one exception is a soft reply ("sounds good"), which gets
+  "reply approve to approve it" and keeps the same recommendation pending for
+  the reply to that question.
 - Only an explicit reply ("yes", "approve", "go ahead", "approve SB-123", ...)
-  approves. Soft replies ("sounds good", "ok") get a request to confirm.
+  approves. The decision is a lookup in fixed word lists plus turn numbers in
+  session state: the same message in the same state always gets the same
+  answer.
 - Approval records the issue in session state. It changes nothing in Linear
   and starts no work.
+
+Why the model is bypassed: returning content from a before_agent_callback
+makes ADK skip the root agent for that message, so neither the model nor any
+tool runs. The model can't turn "sounds good" into an approval, can't claim
+something was approved when it wasn't, and can't call a tool as a side effect
+of approving. The confirmation text is written here, by code, too.
 """
 
 import re

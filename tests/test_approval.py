@@ -301,3 +301,169 @@ def test_normal_questions_are_answered_by_the_model(chat):
 )
 def test_classify(text, expected):
     assert classify(text) == expected
+
+
+# --- final review (V0.7.1): the next-message rule -----------------------------
+
+
+@pytest.mark.parametrize(
+    ("between", "script"),
+    [
+        ("Interesting", [say("It is.")]),  # a reaction, answered by the model
+        ("Tell me more", [say("More detail.")]),  # a request, answered by the model
+        ("Tell me about TEST-3", [call("get_issue", issue_id="TEST-3"), say("Rate limiting.")]),  # a tool turn
+        ("How is the cycle going?", [call("get_cycle_status"), say("Half done.")]),
+    ],
+)
+def test_pending_applies_only_to_the_very_next_message(chat, between, script):
+    chat.send("What should we work on next?", recommend())  # turn 1: shown
+    chat.send(between, script)  # turn 2: anything that isn't an approval
+
+    reply = chat.send("yes")  # turn 3: too late
+
+    assert reply.startswith("Not approved: the recommendation for TEST-2 is no longer pending")
+    assert APPROVED_KEY not in chat.state
+
+
+def test_approval_on_the_next_message_is_accepted(chat):
+    chat.send("What should we work on next?", recommend())
+    assert chat.state[PENDING_KEY]["turn"] == 1
+
+    chat.send("yes")  # turn 2
+
+    assert chat.state[APPROVED_KEY]["approved_turn"] == 2
+
+
+def test_each_soft_reply_keeps_it_pending_for_exactly_one_more_message(chat):
+    chat.send("What should we work on next?", recommend())
+    chat.send("sounds good")  # asked to confirm; pending for turn 3
+    chat.send("ok")  # asked again; pending for turn 4
+
+    chat.send("approve")
+
+    assert chat.state[APPROVED_KEY]["issue_id"] == "TEST-2"
+
+
+# --- final review: approval has no side effects -------------------------------
+
+
+def test_an_approval_turn_makes_no_network_call_at_all(chat, monkeypatch):
+    import socket
+
+    chat.send("What should we work on next?", recommend())
+
+    class Boom(Exception):
+        pass
+
+    def no_network(*args, **kwargs):
+        raise Boom("network used during approval")
+
+    async def no_linear(*args, **kwargs):
+        raise Boom("Linear used during approval")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    monkeypatch.setattr(chat.linear, "query", no_linear)
+
+    reply = chat.send("Yes, proceed")  # the script is empty: a model call would fail too
+
+    assert reply.startswith("Approved.")
+    assert not any(event.get_function_calls() for event in chat.events)
+    changed = set().union(*(event.actions.state_delta for event in chat.events))
+    assert changed == {"turn", PENDING_KEY, APPROVED_KEY}  # nothing but session state
+
+
+def test_approval_module_can_only_touch_session_state():
+    # Everything approval.py can reach: no Linear, no tools, no agents, no I/O.
+    import ast
+    from pathlib import Path
+
+    import cycle_runner.approval as approval
+
+    tree = ast.parse(Path(approval.__file__).read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.add(node.module)
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+    assert imported == {"re", "datetime", "typing", "google.genai", "cycle_runner.recommendation"}
+    from_recommendation = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "cycle_runner.recommendation"
+        for alias in node.names
+    }
+    assert from_recommendation == {"PENDING_KEY", "TURN_KEY"}  # constants only
+
+
+# --- final review: approval decisions are deterministic -----------------------
+
+
+def _pending_state(turn_shown=1, issue="TEST-2"):
+    return {
+        "turn": turn_shown,
+        PENDING_KEY: {
+            "turn": turn_shown,
+            "recommendation": {
+                "recommended_issue_id": issue,
+                "cycle_number": 42,
+                "candidates": [{"issue_id": issue, "title": "Fix the flaky login"}],
+            },
+        },
+    }
+
+
+def _gate(text, state):
+    from types import SimpleNamespace
+
+    from cycle_runner.approval import approval_gate
+
+    context = SimpleNamespace(state=state, user_content=types.Content(role="user", parts=[types.Part(text=text)]))
+    reply = approval_gate(context)
+    return reply and reply.parts[0].text
+
+
+@pytest.mark.parametrize(
+    ("text", "state", "starts"),
+    [
+        ("yes", _pending_state(), "Approved."),
+        ("approve TEST-9", _pending_state(), "Not approved: the pending recommendation is TEST-2"),
+        ("sounds good", _pending_state(), 'To approve TEST-2, reply "approve"'),
+        ("yes", {**_pending_state(), "turn": 2}, "Not approved: the recommendation for TEST-2 is no longer pending"),
+        ("tell me more", _pending_state(), None),  # goes to the model
+        ("yes", {"turn": 5}, None),  # nothing pending: goes to the model
+    ],
+)
+def test_the_gate_is_a_pure_function_of_message_and_state(text, state, starts):
+    # No Runner, no model, no Linear: just the callback, a message and a dict.
+    import copy
+
+    first = _gate(text, copy.deepcopy(state))
+    second = _gate(text, copy.deepcopy(state))
+
+    assert first == second  # same input, same decision, every time
+    if starts is None:
+        assert first is None
+    else:
+        assert first.startswith(starts)
+
+
+@pytest.mark.parametrize("reply", ["yes", "approve TEST-3", "sounds good"])
+def test_no_gate_decision_ever_asks_the_model(chat, reply):
+    chat.send("What should we work on next?", recommend())
+    calls_before = len(chat.llm.requests)
+
+    chat.send(reply)  # the script is empty: any model call would raise
+
+    assert len(chat.llm.requests) == calls_before
+
+
+def test_a_stale_approval_is_refused_without_asking_the_model(chat):
+    chat.send("What should we work on next?", recommend())
+    chat.send("Tell me more", [say("More.")])
+    calls_before = len(chat.llm.requests)
+
+    chat.send("yes")
+
+    assert len(chat.llm.requests) == calls_before

@@ -746,3 +746,14 @@ action.
   blocked work not picked, nothing actionable, approving a live
   recommendation, soft replies, and normal questions after a recommendation.
 
+
+### Open concerns for V0.8
+
+- **Blocked-issue list is long.** Every recommendation lists all open issues
+  blocked by open work. On real Cycle 10 that's five lines before the unknowns
+  and the question. It's accurate, but noisy in Telegram. Left as is in V0.7;
+  a V0.8 usability decision (for example, count them and show only the ones
+  that block a candidate).
+- **Approvals live in session memory.** A restart forgets pending and
+  approved items. That's acceptable while approval executes nothing. It has
+  to change before an approved item can trigger work.
