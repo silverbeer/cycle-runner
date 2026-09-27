@@ -23,6 +23,7 @@ Nothing here writes to Linear or starts any work.
 """
 
 import logging
+import uuid
 from typing import Any
 
 from google.adk.agents import Agent
@@ -304,6 +305,10 @@ def store_recommendation(
         tool_context.state[PENDING_KEY] = {
             "recommendation": recommendation.model_dump(),
             "turn": tool_context.state.get(TURN_KEY, 0),
+            # Identifies this one recommendation. Approving it creates at most one
+            # work request (the store enforces UNIQUE on it), however often the
+            # approval is processed.
+            "recommendation_id": str(uuid.uuid4()),
         }
     return {"message": render(recommendation)}
 

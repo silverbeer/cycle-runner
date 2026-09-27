@@ -85,3 +85,51 @@ def test_approval_and_recommendation_cannot_reach_linear_or_start_processes():
         imports = _imported_modules(PACKAGE / module)
         forbidden = {"httpx", "subprocess", "cycle_runner.linear_client", "os", "multiprocessing"}
         assert not imports & forbidden, (module, imports & forbidden)
+
+
+# --- V0.8: approval -> work-request store, and nothing else ------------------
+
+
+def test_only_the_work_request_store_knows_about_sqlite():
+    users = [path.name for path in _modules() if "sqlite3" in _imported_modules(path)]
+    assert users == ["work_requests.py"]
+
+
+def test_the_store_knows_nothing_about_adk_telegram_linear_or_the_rest_of_the_app():
+    imports = _imported_modules(PACKAGE / "work_requests.py")
+    assert not any(
+        name.startswith(("google", "telegram", "httpx", "litellm", "cycle_runner")) for name in imports
+    ), imports
+
+
+def test_only_approval_can_reach_the_work_request_store():
+    # The agent, the recommender, the tools, the gateway and Telegram can't
+    # create (or read) work requests; only the deterministic approval code can.
+    users = [
+        path.name
+        for path in _modules()
+        if path.name != "work_requests.py"
+        and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
+    ]
+    assert users == ["approval.py"]
+
+
+@pytest.mark.parametrize(
+    ("forbidden", "why"),
+    [
+        (("google.adk",), "the model and agents"),
+        (("cycle_runner.linear_client", "cycle_runner.linear_tools", "httpx"), "Linear"),
+        (("telegram", "cycle_runner.telegram_adapter", "cycle_runner.gateway"), "Telegram"),
+        (("subprocess", "multiprocessing", "claude_agent_sdk", "kubernetes"), "a coding agent"),
+    ],
+)
+def test_approval_cannot_reach(forbidden, why):
+    imports = _imported_modules(PACKAGE / "approval.py")
+    assert not [name for name in imports if name.startswith(forbidden)], f"approval.py reaches {why}"
+
+
+def test_the_agent_has_no_tool_that_touches_work_requests():
+    from cycle_runner.agent import root_agent
+
+    names = [getattr(tool, "__name__", None) or tool.name for tool in root_agent.tools]
+    assert names == ["get_cycle_status", "get_issue", "recommend_next_work"]

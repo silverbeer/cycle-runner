@@ -13,8 +13,9 @@ every user message. Approval is decided here, by code, never by the model:
   approves. The decision is a lookup in fixed word lists plus turn numbers in
   session state: the same message in the same state always gets the same
   answer.
-- Approval records the issue in session state. It changes nothing in Linear
-  and starts no work.
+- Approval creates a durable, pending work request (work_requests.py), at most
+  once per recommendation. It changes nothing in Linear and starts no work.
+  The store is the only thing approval touches beyond session state.
 
 Why the model is bypassed: returning content from a before_agent_callback
 makes ADK skip the root agent for that message, so neither the model nor any
@@ -23,6 +24,7 @@ something was approved when it wasn't, and can't call a tool as a side effect
 of approving. The confirmation text is written here, by code, too.
 """
 
+import logging
 import re
 from datetime import UTC, datetime
 from typing import Literal
@@ -30,6 +32,9 @@ from typing import Literal
 from google.genai import types
 
 from cycle_runner.recommendation import PENDING_KEY, TURN_KEY
+from cycle_runner.work_requests import open_store
+
+log = logging.getLogger(__name__)
 
 APPROVED_KEY = "approved_work_item"
 
@@ -69,40 +74,30 @@ def approval_gate(callback_context) -> types.Content | None:
     state = callback_context.state
     turn = state.get(TURN_KEY, 0) + 1
     state[TURN_KEY] = turn
+    kind, named_id = classify(_text(callback_context.user_content))
 
     pending = state.get(PENDING_KEY)
     if not pending:
-        return None  # nothing to approve: the model answers as usual
+        return _repeat_of_last_approval(state, turn) if kind == "approve" else None
 
-    kind, named_id = classify(_text(callback_context.user_content))
     active = pending["turn"] == turn - 1
     issue_id = pending["recommendation"]["recommended_issue_id"]
 
     if kind == "approve":
-        state[PENDING_KEY] = None  # an approval attempt always consumes the pending item
         if not active:
+            state[PENDING_KEY] = None
             return _reply(
                 f"Not approved: the recommendation for {issue_id} is no longer pending, "
-                "because the conversation moved on. Nothing was recorded. "
+                "because the conversation moved on. No work request was created. "
                 'Ask "what should we work on next?" for a fresh recommendation.'
             )
         if named_id and named_id != issue_id:
+            state[PENDING_KEY] = None
             return _reply(
                 f"Not approved: the pending recommendation is {issue_id}, not {named_id}. "
-                "Nothing was recorded."
+                "No work request was created."
             )
-        title = _title(pending["recommendation"], issue_id)
-        state[APPROVED_KEY] = {
-            "issue_id": issue_id,
-            "title": title,
-            "cycle_number": pending["recommendation"]["cycle_number"],
-            "approved_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "approved_turn": turn,
-        }
-        return _reply(
-            f"Approved. I have recorded your approval for {issue_id}: {title}. "
-            "No action has been taken yet: nothing was changed in Linear and no work was started."
-        )
+        return _approve(callback_context, pending, turn)
 
     if kind == "soft" and active:
         pending["turn"] = turn  # still pending for the next reply
@@ -117,14 +112,75 @@ def approval_gate(callback_context) -> types.Content | None:
     return None
 
 
+def _approve(callback_context, pending: dict, turn: int) -> types.Content:
+    """Turn a valid approval into a durable work request, exactly once."""
+    state = callback_context.state
+    recommendation = pending["recommendation"]
+    issue_id = recommendation["recommended_issue_id"]
+    candidate = next(c for c in recommendation["candidates"] if c["issue_id"] == issue_id)
+    log.info("approval received for %s", issue_id)
+
+    # The durable write comes first. If anything after it fails, a retry of the
+    # same approval finds the same recommendation_id and gets the same request.
+    try:
+        request, created = open_store().create_for_approval(
+            recommendation_id=pending["recommendation_id"],
+            issue_id=issue_id,
+            approved_by=callback_context.user_id,
+            approved_at=datetime.now(UTC),
+            cycle_number=recommendation["cycle_number"],
+            title_at_approval=candidate["title"],
+            rationale=candidate["rationale"],
+        )
+    except Exception:
+        log.exception("could not record the work request for %s", issue_id)
+        pending["turn"] = turn  # still pending, so the next reply can retry
+        state[PENDING_KEY] = pending
+        return _reply(
+            f"Not approved: I couldn't record a work request for {issue_id}. "
+            "Nothing was created. Reply \"approve\" to try again."
+        )
+
+    log.info(
+        "work request %s %s for %s",
+        request.work_request_id, "created" if created else "already existed", issue_id,
+    )
+    state[PENDING_KEY] = None
+    state[APPROVED_KEY] = {
+        "work_request_id": request.work_request_id,
+        "issue_id": issue_id,
+        "title": candidate["title"],
+        "approved_turn": turn,
+    }
+    if not created:
+        return _already_approved(request.work_request_id, issue_id)
+    return _reply(
+        f"Approved {issue_id}. Work request {request.work_request_id} created. "
+        "No work has been started: nothing was changed in Linear."
+    )
+
+
+def _repeat_of_last_approval(state, turn: int) -> types.Content | None:
+    """ "yes" again, right after an approval (a double send or a retried update)."""
+    approved = state.get(APPROVED_KEY)
+    if approved and approved["approved_turn"] == turn - 1:
+        approved["approved_turn"] = turn  # a third "yes" gets the same answer
+        state[APPROVED_KEY] = approved
+        return _already_approved(approved["work_request_id"], approved["issue_id"])
+    return None  # nothing pending: the model answers, and it can't approve anything
+
+
+def _already_approved(work_request_id: str, issue_id: str) -> types.Content:
+    return _reply(
+        f"Already approved: {issue_id} is work request {work_request_id}, still pending. "
+        "No new work request was created."
+    )
+
+
 def _text(content: types.Content | None) -> str:
     if content is None or not content.parts:
         return ""
     return " ".join(part.text for part in content.parts if part.text)
-
-
-def _title(recommendation: dict, issue_id: str) -> str:
-    return next(c["title"] for c in recommendation["candidates"] if c["issue_id"] == issue_id)
 
 
 def _reply(text: str) -> types.Content:

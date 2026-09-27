@@ -122,6 +122,14 @@ class FakeLinear:
 
 
 @pytest.fixture(autouse=True)
+def work_request_db(tmp_path, monkeypatch):
+    """Every test gets its own work-request database, never the developer's."""
+    path = tmp_path / "cycle-runner.db"
+    monkeypatch.setenv("CYCLE_RUNNER_DB", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
 def fixed_today(monkeypatch):
     """Pin "today" so ages and days remaining are deterministic: 2030-01-10."""
     monkeypatch.setattr(linear_tools, "_today", lambda: date(2030, 1, 10))

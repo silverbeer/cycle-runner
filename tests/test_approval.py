@@ -17,6 +17,7 @@ from conftest import FakeLinear, ScriptedLlm, call, fake_issue, say
 from cycle_runner import linear_tools
 from cycle_runner.agent import build_root_agent
 from cycle_runner.approval import APPROVED_KEY, classify
+from cycle_runner.work_requests import open_store
 from cycle_runner.recommendation import (
     EVIDENCE_KEY,
     OUTPUT_KEY,
@@ -174,11 +175,13 @@ def test_explicit_approval_records_the_pending_recommendation(chat):
     reply = chat.send("Yes, proceed")
 
     approved = chat.state[APPROVED_KEY]
-    assert (approved["issue_id"], approved["title"], approved["cycle_number"]) == (
-        "TEST-2", "Fix the flaky login", 42,
+    assert (approved["issue_id"], approved["title"], approved["work_request_id"]) == (
+        "TEST-2", "Fix the flaky login", "WR-000001",
     )
-    assert reply.startswith("Approved. I have recorded your approval for TEST-2")
-    assert "No action has been taken yet" in reply
+    assert reply == (
+        "Approved TEST-2. Work request WR-000001 created. "
+        "No work has been started: nothing was changed in Linear."
+    )
     assert chat.state.get(PENDING_KEY) is None
 
 
@@ -367,7 +370,8 @@ def test_an_approval_turn_makes_no_network_call_at_all(chat, monkeypatch):
 
     reply = chat.send("Yes, proceed")  # the script is empty: a model call would fail too
 
-    assert reply.startswith("Approved.")
+    assert reply.startswith("Approved TEST-2. Work request WR-000001 created.")
+    assert [r.issue_id for r in open_store().list_all()] == ["TEST-2"]  # the one new side effect
     assert not any(event.get_function_calls() for event in chat.events)
     changed = set().union(*(event.actions.state_delta for event in chat.events))
     assert changed == {"turn", PENDING_KEY, APPROVED_KEY}  # nothing but session state
@@ -387,7 +391,10 @@ def test_approval_module_can_only_touch_session_state():
             imported.add(node.module)
         elif isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
-    assert imported == {"re", "datetime", "typing", "google.genai", "cycle_runner.recommendation"}
+    assert imported == {
+        "logging", "re", "datetime", "typing", "google.genai",
+        "cycle_runner.recommendation", "cycle_runner.work_requests",
+    }
     from_recommendation = {
         alias.name
         for node in ast.walk(tree)
@@ -395,6 +402,13 @@ def test_approval_module_can_only_touch_session_state():
         for alias in node.names
     }
     assert from_recommendation == {"PENDING_KEY", "TURN_KEY"}  # constants only
+    from_store = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "cycle_runner.work_requests"
+        for alias in node.names
+    }
+    assert from_store == {"open_store"}  # the one new side effect: the work-request store
 
 
 # --- final review: approval decisions are deterministic -----------------------
@@ -405,10 +419,11 @@ def _pending_state(turn_shown=1, issue="TEST-2"):
         "turn": turn_shown,
         PENDING_KEY: {
             "turn": turn_shown,
+            "recommendation_id": "rec-fixed",
             "recommendation": {
                 "recommended_issue_id": issue,
                 "cycle_number": 42,
-                "candidates": [{"issue_id": issue, "title": "Fix the flaky login"}],
+                "candidates": [{"issue_id": issue, "title": "Fix the flaky login", "rationale": "In progress."}],
             },
         },
     }
@@ -419,7 +434,10 @@ def _gate(text, state):
 
     from cycle_runner.approval import approval_gate
 
-    context = SimpleNamespace(state=state, user_content=types.Content(role="user", parts=[types.Part(text=text)]))
+    context = SimpleNamespace(
+        state=state, user_id="telegram:111",
+        user_content=types.Content(role="user", parts=[types.Part(text=text)]),
+    )
     reply = approval_gate(context)
     return reply and reply.parts[0].text
 
@@ -427,7 +445,7 @@ def _gate(text, state):
 @pytest.mark.parametrize(
     ("text", "state", "starts"),
     [
-        ("yes", _pending_state(), "Approved."),
+        ("yes", _pending_state(), "Approved TEST-2. Work request WR-000001 created."),
         ("approve TEST-9", _pending_state(), "Not approved: the pending recommendation is TEST-2"),
         ("sounds good", _pending_state(), 'To approve TEST-2, reply "approve"'),
         ("yes", {**_pending_state(), "turn": 2}, "Not approved: the recommendation for TEST-2 is no longer pending"),
@@ -442,11 +460,18 @@ def test_the_gate_is_a_pure_function_of_message_and_state(text, state, starts):
     first = _gate(text, copy.deepcopy(state))
     second = _gate(text, copy.deepcopy(state))
 
-    assert first == second  # same input, same decision, every time
     if starts is None:
-        assert first is None
+        assert first is second is None
     else:
         assert first.startswith(starts)
+    if starts and starts.startswith("Approved"):
+        # The one decision with a durable effect: processing the same approval
+        # again finds the same request instead of creating another.
+        assert second.startswith("Already approved: TEST-2 is work request WR-000001")
+        assert len(open_store().list_all()) == 1
+    else:
+        assert first == second  # same input, same decision, every time
+        assert open_store().list_all() == []
 
 
 @pytest.mark.parametrize("reply", ["yes", "approve TEST-3", "sounds good"])
