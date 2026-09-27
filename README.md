@@ -20,6 +20,9 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
   [V0.7](#v07).
 - **V0.8**: an approval creates a durable work request (`WR-000001`, pending)
   in SQLite that survives restarts. Still nothing executes. See [V0.8](#v08).
+- **V0.9**: a separate executor claims pending work requests atomically and
+  runs them through a deterministic `FakeExecutor` to `completed`. No real work
+  yet. See [V0.9](#v09).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -138,8 +141,10 @@ connection error.
   *other* agents read when deciding whether to hand work to it.
 - **`root_agent` convention**: `adk run` and `adk web` import
   `<package>.agent` and look for a variable called `root_agent`. That's why
-  `__init__.py` does `from . import agent`. (`__main__.py` is only for the
-  Telegram bot; `adk run` doesn't use it.)
+  `__init__.py` used to do `from . import agent`; since V0.9 it's empty,
+  because ADK imports `cycle_runner.agent` itself and the import made every
+  module load ADK. (`__main__.py` is only for the Telegram bot; `adk run`
+  doesn't use it.)
 - **Model adapter (`LiteLlm`)**: ADK speaks Gemini natively. Anything else goes
   through a model adapter; `LiteLlm` wraps [LiteLLM](https://docs.litellm.ai),
   which knows how to talk to Ollama.
@@ -857,4 +862,122 @@ agent / recommender / tools / gateway / Telegram ──╳─► work_requests.p
   nothing was created, but confusing. V0.7 deliberately lets the model handle
   "yes" when nothing is pending, so that "yes" can still answer the model's
   own questions. Worth revisiting.
+
+## V0.9
+
+The first executor. It runs outside the Telegram app and knows nothing about
+ADK, Telegram, Linear or the model. It takes durable work requests through
+their whole lifecycle using a `FakeExecutor` that does no real work.
+
+```
+WorkRequest(pending) ─claim (atomic)─► claimed ─start─► running ─FakeExecutor─► completed
+```
+
+### The lifecycle
+
+```
+pending ──claim──► claimed ──start──► running ──finish──► completed
+   ▲                  │                   └────finish──► failed
+   └────release───────┘ (manual)          running ──abandon──► failed (manual)
+```
+
+- **`claimed` and `running` are separate** because they're the only way to
+  tell a crash *before* the executor ran (nothing happened, so it's safe to
+  retry) from one *during* it (work may have partly happened, so it isn't).
+- **`failed` exists now** because an executor can fail. Without it, a failure
+  would be indistinguishable from a crash (stuck in `running`).
+- `completed` and `failed` are final.
+- `TRANSITIONS` in `work_requests.py` is the only definition. A database
+  trigger generated from it rejects any other status change, from any
+  writer, including the `sqlite3` shell. Another trigger keeps new rows
+  `pending`.
+
+### Executor interface
+
+```python
+class ExecutionResult(BaseModel):
+    outcome: Literal["completed", "failed"]
+    message: str
+
+class Executor(Protocol):
+    name: str
+    def execute(self, request: WorkRequest) -> ExecutionResult: ...
+```
+
+Claiming, statuses and timestamps belong to the runner (`run_next`,
+`run_request`) and the store, not the executor. A future coding-agent
+executor implements `execute()` and nothing else changes.
+`FakeExecutor` returns "Fake execution completed for WR-000001 (SB-640). No
+real work was done.", imports only the interface and the model, and does no
+I/O: tests forbid sockets, subprocesses and file access around it.
+
+### The atomic claim
+
+Every transition is one compare-and-set statement:
+`UPDATE … SET status = 'claimed' … WHERE id = ? AND status = 'pending' RETURNING *`.
+`claim_next` finds and claims the oldest pending row in a single statement.
+SQLite runs each under its write lock, and the loser of a race waits for the
+lock (`timeout=10`), then matches no rows: "already claimed". Tested with real
+OS processes: 8 racing for one request gives exactly one winner; 8 racing for
+3 requests gives each claimed exactly once. The race tests passed 10 of 10
+runs.
+
+### Crashes and recovery
+
+| Crash | State left | What happens next |
+|---|---|---|
+| before claim | `pending` | the next run picks it up |
+| after claim, before the executor ran | `claimed` | runs skip it; `executor release WR-…` puts it back to `pending` (safe: nothing ran) |
+| while running | `running` | runs skip it and never retry it; `executor abandon WR-… --reason …` marks it `failed` for a human |
+| executor raises | `failed` | recorded with the exception; never retried |
+
+There are no leases. A stranded request needs a human, which is acceptable
+while one person runs one executor by hand. The crash tests kill real
+processes (`os._exit`) at each point and check the state a fresh process
+sees.
+
+### Idempotency
+
+`run_request` on anything that isn't `pending` executes nothing and reports
+what it is: running `WR-000001` twice gives "WR-000001 is already completed;
+nothing executed."
+
+### Run it
+
+```bash
+uv run python -m cycle_runner.executor            # run the next pending request, then exit
+uv run python -m cycle_runner.executor run --request WR-000002
+uv run python -m cycle_runner.executor list
+uv run python -m cycle_runner.executor release WR-000002
+uv run python -m cycle_runner.executor abandon WR-000002 --reason "executor died"
+```
+
+No `op run` is needed: the executor uses no credentials. It exits after one
+request; there's no daemon.
+
+> **Careful with real approvals.** The executor claims the *oldest pending*
+> request. On your development database that's a real approval (for example
+> `WR-000001`, SB-640), and `FakeExecutor` would mark it `completed` with a
+> fake result. Its `claimed_by` (`fake@host:pid`) and message make that
+> visible, but the approval is consumed. Point `CYCLE_RUNNER_DB` at a scratch
+> file to experiment.
+
+### Migration
+
+Opening a V0.8 database migrates it to schema version 2 in one transaction.
+SQLite can't alter a `CHECK`, so the table is rebuilt, keeping every row, id
+and the never-reuse counter. Verified on a copy of a real database: its
+approval came through unchanged.
+
+### Open concerns for V0.10
+
+- **No leases:** stranded `claimed` or `running` requests need manual
+  recovery.
+- **The real executor's inputs:** the request holds the issue id and a
+  snapshot of what was approved, but a coding agent will need the current
+  issue (description, repo). Where that's read from, and whether the executor
+  may read Linear, is the next design question.
+- **Several pending requests per issue** are still possible (from V0.8).
+- **Blocked-issue list length** and a **bare "yes" after a restart** are
+  still open (from V0.8).
 
