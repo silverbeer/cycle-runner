@@ -172,7 +172,7 @@ def _repeat_of_last_approval(state, turn: int) -> types.Content | None:
 
 def _already_approved(work_request_id: str, issue_id: str) -> types.Content:
     return _reply(
-        f"Already approved: {issue_id} is work request {work_request_id}, still pending. "
+        f"Already approved: {issue_id} is work request {work_request_id}. "
         "No new work request was created."
     )
 
