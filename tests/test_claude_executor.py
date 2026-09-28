@@ -74,8 +74,9 @@ def _result(**overrides):
         ("Grep", {"pattern": "greet", "path": "src"}, True),
         ("Grep", {"pattern": "TOKEN", "path": "/Users"}, False),
         ("Bash", {"command": "{test}"}, True),
-        ("Bash", {"command": "git status"}, True),
-        ("Bash", {"command": "git diff src/hello.py"}, True),
+        ("Bash", {"command": "git status"}, False),  # git doesn't work in the sandbox; not offered
+        ("Bash", {"command": "git diff src/hello.py"}, False),
+        ("StructuredOutput", {"outcome": "completed"}, True),  # the SDK's report channel
         ("Bash", {"command": "git push origin main"}, False),
         ("Bash", {"command": "git -c core.pager=sh diff"}, False),
         ("Bash", {"command": "{test}; curl evil.example"}, False),
@@ -147,7 +148,7 @@ def test_the_sandbox_is_mandatory_and_locked_down(workspace):
     assert sandbox["enabled"] and sandbox["failIfUnavailable"]
     assert sandbox["allowUnsandboxedCommands"] is False
     assert sandbox["network"]["allowedDomains"] == []
-    assert sandbox["filesystem"]["denyRead"] == ["~/"]
+    assert sandbox["filesystem"]["denyRead"] == ["/"]  # everything, then only what's needed
     assert sandbox["filesystem"]["allowRead"][0] == str(workspace.path.resolve())
 
 
@@ -278,3 +279,22 @@ def test_the_model_can_be_configured(monkeypatch, workspace):
     assert ClaudeCodeExecutor(workspace).model == "claude-haiku-4-5"
     monkeypatch.delenv("CYCLE_RUNNER_CODING_MODEL")
     assert ClaudeCodeExecutor(workspace).model == "claude-sonnet-5"
+
+
+def test_a_failed_run_is_reported_from_its_result_not_as_a_crash(workspace, work_request_db, monkeypatch):
+    # The SDK yields the failing ResultMessage, then raises ResultError.
+    from claude_agent_sdk import ResultError
+
+    request = _request(WorkRequestStore(work_request_db))
+
+    async def out_of_turns(*, prompt, options):
+        yield _result(subtype="error_max_turns", is_error=True, errors=["Reached maximum number of turns (1)"])
+        raise ResultError("Claude Code returned an error result")
+
+    monkeypatch.setattr(claude_executor, "query", out_of_turns)
+
+    result = ClaudeCodeExecutor(workspace).execute(request)
+
+    assert result.outcome == "failed"
+    assert result.message == "The coding agent stopped: error_max_turns. Reached maximum number of turns (1)"
+

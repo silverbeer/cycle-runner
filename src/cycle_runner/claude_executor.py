@@ -17,24 +17,27 @@ Confinement, from outermost to innermost. None of it relies on the prompt:
 2. tools: only Read, Glob, Grep, Edit, Write and Bash exist. No web, no
    subagents, no MCP.
 3. permission_mode="dontAsk" with allow rules scoped to the workspace and to
-   the test and git-read commands: anything else that would need approval is
-   denied.
+   the test command: anything else that would need approval is denied.
 4. A PreToolUse hook (check_tool_call) sees every tool call before anything
    else and denies paths outside the workspace, writes into .git, and any
    Bash command not on a short allowlist.
 5. The OS sandbox (Seatbelt on macOS) wraps every Bash command and its child
-   processes, including tests the agent wrote: writes only in the workspace,
-   no reads under the home directory except the workspace and the Python
-   install, no network, no unsandboxed fallback, and a hard failure if the
-   sandbox can't start.
+   processes, including tests the agent wrote: writes only in the workspace;
+   reads only in the workspace, the test interpreter and a few system
+   directories (not the home directory, not other temp directories, not
+   other repos); no network; no unsandboxed fallback; and a hard failure if
+   the sandbox can't start.
 6. Credentials: every credential-looking environment variable is blanked for
    the agent, and all of them (including the agent's own login) are unset
    inside sandboxed commands.
 
 Measured, not assumed: with setting_sources=[] the sandbox settings still
-apply. A test run by the agent could not read ~/.ssh, ~/.zshenv or another
-repo's .env, could not write outside the workspace, had no network, and saw
-no credentials.
+apply. A test run by the agent could not read ~/.ssh, ~/.zshenv, another
+repo's .env, a neighbouring directory or /etc, could not write outside the
+workspace, had no network, and saw no credentials. Git doesn't work inside
+this sandbox (macOS's git is an xcode-select shim that needs more of the
+system), so the agent isn't given it; the executor finds changed files by
+hashing the workspace instead.
 """
 
 import asyncio
@@ -47,7 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, HookMatcher, ResultMessage, query
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, HookMatcher, ResultError, ResultMessage, query
 from pydantic import BaseModel, ValidationError
 
 from cycle_runner.executor import ExecutionResult
@@ -59,7 +62,13 @@ PATH_TOOLS = {"Read", "Edit", "Write"}
 WRITE_TOOLS = {"Edit", "Write"}
 SEARCH_TOOLS = {"Glob", "Grep"}
 SHELL_METACHARACTERS = re.compile(r"[;&|<>`$\\\n]")
-GIT_READ = re.compile(r"^git (status|diff|log)( [\w./=-]+)*$")
+# The SDK delivers output_format results through this tool; it carries the
+# report and touches nothing, so the hook must let it through.
+REPORT_TOOL = "StructuredOutput"
+# What sandboxed commands may read besides the workspace and Workspace.readable:
+# the system directories a process needs to start. Everything else, including
+# the home directory, other temp directories and other repos, is unreadable.
+SYSTEM_READABLE = ("/usr", "/bin", "/sbin", "/System", "/dev", "/private/etc", "/private/var/db/timezone")
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
 AGENT_LOGIN_VARIABLES = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}  # the CLI itself needs one
 
@@ -98,9 +107,10 @@ def build_prompt(request: WorkRequest, workspace: Workspace) -> str:
         f"for issue {request.issue_id}.\n\n"
         f"Task: {request.title_at_approval}\n"
         f"Why it was chosen: {request.rationale}\n\n"
-        "Work only inside the current directory. Make the smallest change that "
+        "Work only inside the current directory. Use Read, Glob and Grep to look "
+        "around and Edit or Write to change files. Make the smallest change that "
         "completes the task, add or update tests for it, then run the tests with "
-        f"exactly this command:\n\n    {workspace.test_command}\n\n"
+        f"exactly this command, the only one Bash will run:\n\n    {workspace.test_command}\n\n"
         "You can't reach the network, other directories or other commands. "
         "Don't commit. Report outcome 'completed' only if the task is done and "
         "the tests pass; otherwise report 'failed' and say why."
@@ -113,6 +123,8 @@ def build_prompt(request: WorkRequest, workspace: Workspace) -> str:
 def check_tool_call(tool_name: str, tool_input: dict[str, Any], workspace: Workspace) -> str | None:
     """Why this tool call is refused, or None if it may proceed. Deterministic."""
     root = workspace.path.resolve()
+    if tool_name == REPORT_TOOL:
+        return None
     if tool_name not in TOOLS:
         return f"{tool_name} is not available to this executor"
     if tool_name in PATH_TOOLS:
@@ -133,9 +145,9 @@ def check_tool_call(tool_name: str, tool_input: dict[str, Any], workspace: Works
     command = " ".join(str(tool_input.get("command", "")).split())
     if SHELL_METACHARACTERS.search(command):
         return "shell operators, redirection and substitution aren't allowed"
-    if command == workspace.test_command or GIT_READ.match(command):
+    if command == workspace.test_command:
         return None
-    return f"only `{workspace.test_command}` and read-only git commands may run"
+    return f"Bash only runs the tests (`{workspace.test_command}`); use Read, Glob and Grep to explore"
 
 
 def _inside(raw: Any, root: Path) -> Path | None:
@@ -181,7 +193,10 @@ def build_options(workspace: Workspace, *, model: str, max_turns: int, max_budge
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": False,
-            "filesystem": {"denyRead": ["~/"], "allowRead": [root, *(str(p) for p in workspace.readable)]},
+            "filesystem": {
+                "denyRead": ["/"],
+                "allowRead": [root, *(str(p) for p in workspace.readable), *SYSTEM_READABLE],
+            },
             "network": {"allowedDomains": []},
             "credentials": {
                 "envVars": [{"name": name, "mode": "deny"} for name in sorted({*credentials, *AGENT_LOGIN_VARIABLES})]
@@ -198,9 +213,6 @@ def build_options(workspace: Workspace, *, model: str, max_turns: int, max_budge
             f"Read(/{root}/**)",
             f"Edit(/{root}/**)",
             f"Bash({workspace.test_command})",
-            "Bash(git status*)",
-            "Bash(git diff*)",
-            "Bash(git log*)",
         ],
         hooks={"PreToolUse": [HookMatcher(hooks=[_policy_hook(workspace)])]},
         settings=json.dumps(settings),
@@ -297,9 +309,15 @@ class ClaudeCodeExecutor:
             max_budget_usd=self.max_budget_usd, environ=dict(os.environ),
         )
         result = None
-        async for message in query(prompt=build_prompt(request, self.workspace), options=options):
-            if isinstance(message, ResultMessage):
-                result = message
+        try:
+            async for message in query(prompt=build_prompt(request, self.workspace), options=options):
+                if isinstance(message, ResultMessage):
+                    result = message
+        except ResultError:
+            # A failed run yields its ResultMessage (turn limit, budget, ...) and
+            # then raises. Report it from the message rather than as a crash.
+            if result is None:
+                raise
         return result
 
 
