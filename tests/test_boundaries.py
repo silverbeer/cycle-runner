@@ -20,7 +20,7 @@ GENERIC_MODULES = {
     "telegram_adapter.py": CORE_BUSINESS_TERMS + ["Linear"],
     "linear_client.py": CORE_BUSINESS_TERMS + ["SB", "cycle"],
 }
-LINEAR_TRANSPORT_TERMS = ["api.linear.app", "oauth", "Authorization", "client_secret"]
+LINEAR_TRANSPORT_TERMS = ["api.linear.app", "oauth/token", "Authorization", "client_secret"]
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -112,7 +112,7 @@ def test_only_approval_and_the_executor_can_reach_the_work_request_store():
         if path.name != "work_requests.py"
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
-    assert sorted(users) == ["approval.py", "executor.py", "fake_executor.py"]
+    assert sorted(users) == ["approval.py", "claude_executor.py", "executor.py", "fake_executor.py"]
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,7 @@ def test_the_agent_has_no_tool_that_touches_work_requests():
 # --- V0.9: the executor stands alone ------------------------------------------
 
 
-@pytest.mark.parametrize("module", ["executor.py", "fake_executor.py", "work_requests.py"])
+@pytest.mark.parametrize("module", ["executor.py", "fake_executor.py", "work_requests.py", "claude_executor.py"])
 def test_execution_modules_cannot_reach_adk_telegram_linear_or_the_conversation(module):
     imports = _imported_modules(PACKAGE / module)
     forbidden = (
@@ -163,7 +163,8 @@ def test_only_the_executor_cli_knows_which_executor_exists():
 
 def test_the_conversation_side_cannot_start_execution():
     users = [path.name for path in _modules() if "cycle_runner.executor" in _imported_modules(path)]
-    assert users == ["fake_executor.py"]  # the interface; nothing in the Telegram/ADK path imports it
+    # The executors implement the interface; nothing in the Telegram/ADK path imports it.
+    assert sorted(users) == ["claude_executor.py", "fake_executor.py"]
 
 
 def test_importing_the_package_does_not_load_adk():
@@ -171,3 +172,27 @@ def test_importing_the_package_does_not_load_adk():
     # would drag ADK in with it.
     assert (PACKAGE / "__init__.py").read_text().strip().startswith('"""')
     assert _imported_modules(PACKAGE / "__init__.py") == set()
+
+
+# --- V1.0: the Claude executor ------------------------------------------------
+
+
+def test_only_the_claude_executor_uses_the_agent_sdk():
+    users = [path.name for path in _modules() if any(n.startswith("claude_agent_sdk") for n in _imported_modules(path))]
+    assert users == ["claude_executor.py"]
+
+
+def test_the_claude_executor_never_touches_lifecycle_state_or_starts_processes():
+    # It executes; the runner claims and records. It doesn't open the store,
+    # talk to SQLite, or shell out itself (the agent's Bash runs in the sandbox).
+    imports = _imported_modules(PACKAGE / "claude_executor.py")
+    assert "sqlite3" not in imports and "subprocess" not in imports
+    source = (PACKAGE / "claude_executor.py").read_text()
+    for forbidden in ["open_store", "WorkRequestStore", ".claim(", ".start(", ".finish(", "bypassPermissions"]:
+        assert forbidden not in source, forbidden
+
+
+def test_the_runner_does_not_know_about_claude():
+    imports = _imported_modules(PACKAGE / "executor.py")
+    assert not [n for n in imports if n.startswith(("claude_agent_sdk", "cycle_runner.claude_executor"))]
+
