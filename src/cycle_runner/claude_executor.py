@@ -139,7 +139,9 @@ def check_tool_call(tool_name: str, tool_input: dict[str, Any], workspace: Works
         if where is not None and _inside(where, root) is None:
             return "searching outside the workspace is off limits"
         pattern = str(tool_input.get("pattern", ""))
-        if ".." in pattern or (tool_name == "Glob" and pattern.startswith("/") and _inside(pattern, root) is None):
+        if ".." in pattern or pattern.startswith("~") or (
+            tool_name == "Glob" and pattern.startswith("/") and _inside(pattern, root) is None
+        ):
             return "search patterns must stay inside the workspace"
         return None
     command = " ".join(str(tool_input.get("command", "")).split())

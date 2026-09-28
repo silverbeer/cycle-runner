@@ -71,6 +71,7 @@ def _result(**overrides):
         ("Glob", {"pattern": "**/*.py", "path": "/Users"}, False),
         ("Glob", {"pattern": "../**/*.env"}, False),
         ("Glob", {"pattern": "/etc/*"}, False),
+        ("Glob", {"pattern": "~/.ssh/*"}, False),  # found in review: ~ in a pattern
         ("Grep", {"pattern": "greet", "path": "src"}, True),
         ("Grep", {"pattern": "TOKEN", "path": "/Users"}, False),
         ("Bash", {"command": "{test}"}, True),
