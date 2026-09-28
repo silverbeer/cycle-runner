@@ -23,6 +23,9 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
 - **V0.9**: a separate executor claims pending work requests atomically and
   runs them through a deterministic `FakeExecutor` to `completed`. No real work
   yet. See [V0.9](#v09).
+- **V1.0**: `ClaudeCodeExecutor`, a real Claude coding agent (Claude Agent SDK)
+  confined to a disposable workspace, returning a structured result. See
+  [V1.0](#v10).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -73,6 +76,7 @@ uv run pytest -m "not ollama and not telegram and not linear"   # offline only
 uv run pytest -m ollama                # live round-trips through the local model
 op run --env-file .env -- uv run pytest -m telegram   # real Telegram API
 op run --env-file .env -- uv run pytest -m linear     # real Linear API, read-only
+CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) uv run pytest -m claude   # real coding agent
 ```
 
 CI (`.github/workflows/ci.yml`) runs the offline set on every PR and every push
@@ -99,6 +103,8 @@ called the tool) and 5 general ones (0/5 did).
 | `LINEAR_CLIENT_SECRET` | none (required) | Linear app client secret, as an `op://` reference in `.env` |
 | `LINEAR_TEAM_KEY` | `SB` | Team whose active cycle `get_cycle_status` reads |
 | `CYCLE_RUNNER_DB` | `data/cycle-runner.db` | SQLite file holding work requests (gitignored) |
+| `CYCLE_RUNNER_CODING_MODEL` | `claude-sonnet-5` | Model for `ClaudeCodeExecutor` |
+| `CLAUDE_CODE_OAUTH_TOKEN` | none | Claude credential for the coding agent; pass it only to runs that need it |
 | `TELEGRAM_BOT_TOKEN` | none (required for Telegram) | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_USER_IDS` | empty, so nobody is allowed | Comma-separated Telegram user ids allowed to chat |
 
@@ -980,4 +986,133 @@ approval came through unchanged.
 - **Several pending requests per issue** are still possible (from V0.8).
 - **Blocked-issue list length** and a **bare "yes" after a restart** are
   still open (from V0.8).
+
+## V1.0
+
+The first real executor. `ClaudeCodeExecutor` hands an approved work request
+to a Claude coding agent (the Claude Agent SDK, which runs Claude Code), in a
+**disposable local repository**, and turns the agent's report into an
+`ExecutionResult`. No real project repository, GitHub, Linear or Telegram is
+involved.
+
+```
+executor.run_request / run_next      owns the lifecycle: claim, start, finish
+        │ WorkRequest (running)
+        ▼
+ClaudeCodeExecutor.execute           builds the task, runs the agent, maps the result
+        │ prompt + ClaudeAgentOptions (confined to one Workspace)
+        ▼
+Claude Agent SDK ─► Claude Code CLI  Read / Glob / Grep / Edit / Write / Bash(tests only)
+        │ StructuredOutput: {outcome, summary, tests_passed, tests_command}
+        ▼
+ExecutionResult(outcome, message, details={files_changed, cost_usd, turns, denials, ...})
+```
+
+### How it works
+
+- **Workspace:** `Workspace(path, test_command, readable)` says where to work
+  and how to check the work. It's passed in; the executor contains no
+  project-specific code. It's the seed of a per-project configuration layer
+  (see "Next").
+- **The task** comes from the `WorkRequest` alone: its id, the issue id, the
+  title as approved, and the rationale. The executor doesn't read Linear.
+- **The result:** the agent must answer in a JSON schema (SDK
+  `output_format`, delivered through a `StructuredOutput` tool call). The
+  result is `completed` only if the SDK run succeeded, the agent reports
+  passing tests, **and** files actually changed. Changed files come from
+  hashing the workspace before and after, not from the agent's say-so and not
+  from running git. `details` carries the files changed, cost, turns and
+  permission denials; it's returned, not yet persisted.
+- **Failures:** an SDK error, a turn or budget limit (`ResultError`, reported
+  from its `ResultMessage`), an invalid report, failing tests or no changes
+  all become `failed` with a readable reason. The runner records it, as with
+  any executor.
+- The lifecycle is untouched: the runner claims, starts and finishes. The
+  executor never opens the store (a boundary test checks this).
+
+### Security boundary
+
+Six layers. None of them relies on the prompt.
+
+| Layer | What it does |
+|---|---|
+| `setting_sources=[]` | none of your `~/.claude` settings, hooks, CLAUDE.md, skills or permission rules load (the SDK default loads all of them) |
+| `tools` | only Read, Glob, Grep, Edit, Write, Bash exist: no web, subagents or MCP |
+| `permission_mode="dontAsk"` | allow rules scoped to the workspace and the exact test command; anything else that needs approval is denied |
+| `PreToolUse` hook (`check_tool_call`) | runs before every tool call. Paths must resolve inside the workspace (symlinks followed, `~` expanded), `.git` is read-only, Bash may only run the test command, with no shell operators. Tested with 36 cases. |
+| OS sandbox (Seatbelt) | every Bash command **and its children**, including tests the agent wrote: writes only in the workspace; reads denied from `/` except the workspace, the test interpreter and system directories; no network; no unsandboxed fallback; fails if unavailable |
+| Credentials | credential-looking variables are blanked for the agent, and all of them (including its own login) are unset inside sandboxed commands |
+
+Measured with a probe test that the agent ran as ordinary work, from inside
+the sandbox:
+
+| Attempt | Result |
+|---|---|
+| read the workspace | allowed |
+| list `~`, `~/.ssh`; read `~/.zshenv`, another repo's `.env` | blocked |
+| read a neighbouring directory, `/etc/hosts` | blocked |
+| write a neighbouring file or `~/…` | blocked (and verified unchanged afterwards) |
+| network | blocked |
+| the executor's credentials (Claude token, 1Password service-account token, Linear key) | not visible |
+
+Things the live runs found, and fixes:
+
+- The first read restriction (`denyRead: ["~/"]`) left paths outside the
+  home directory readable. It's now `denyRead: ["/"]` plus an allowlist.
+- The hook first treated `~/.ssh/…` as a relative path, and let `~/…` Glob
+  patterns through. Both are closed and tested.
+- It first denied the SDK's own `StructuredOutput` tool. It's now allowed.
+- The model itself refused an obviously probing prompt, which is welcome,
+  but it's why the isolation test puts the probe in *test code* instead.
+
+**Caveats**
+- The system allowlist is **macOS-specific**; Linux (bubblewrap) needs its
+  own.
+- Git doesn't run inside this sandbox (macOS's git is an `xcode-select`
+  shim), so the agent isn't offered it.
+- The sandbox sets its own proxy variables (`CLOUDSDK_PROXY_*`,
+  `GIT_CONFIG_*`) pointing at its local proxy; they grant nothing.
+- The task text (issue title, rationale) is untrusted input to the agent.
+  The layers above bound what it could do.
+
+### Run it
+
+```bash
+CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) uv run pytest -m claude
+```
+
+Three live tests run in pytest temp directories:
+
+1. Claude adds `greet()` to a tiny repo through the real runner lifecycle.
+   The test verifies the work independently: the function works, the tests
+   pass, nothing was committed.
+2. A one-turn limit gives a clean `failed`.
+3. The isolation probe above.
+
+About $0.05–0.10 per test in model usage, estimated by the SDK. With the
+OAuth token this comes out of your Claude subscription's limits. The token is
+passed only to these runs, not put in `.env`, so the Telegram bot never has
+it. The deterministic tests (`tests/test_claude_executor.py`) replace the
+SDK's `query()` with a fake and run in CI.
+
+The executor CLI still runs only `FakeExecutor`: V1.0 doesn't let the CLI
+point a real agent at a real directory.
+
+### Deliberately not in V1.0
+
+Real project repositories, GitHub push or PRs, Linear writes, Telegram
+commands, K3s, leases, retries, A2A, or multi-agent orchestration.
+
+### Next
+
+- **Project/workspace configuration:** map a work request to a workspace
+  (repository, how to check it out, test command, readable paths) without
+  project-specific code in the executor. Linear labels such as `MT` or `TRD`
+  are the likely key.
+- **What the agent is told:** the approved title and rationale are thin. The
+  issue description lives in Linear, and whether the runner (not the
+  executor) should fetch it is the open question.
+- **Persist `details`**, and give the result a place for a diff or branch.
+- **The CLI:** a way to run `ClaudeCodeExecutor` on a configured workspace,
+  once workspaces exist.
 
