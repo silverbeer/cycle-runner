@@ -8,16 +8,30 @@ the work request at approval time. Everything project-specific is in the
 configuration file; there is no project name anywhere in the code, so adding
 a project means adding a [projects.X] table.
 
-The workspace is always a fresh clone of the configured repository, made for
-one work request, with its origin remote removed. The real checkout is only
-read, never changed.
+The workspace is always a fresh clone of the configured repository (its
+configured branch), made for one work request, with its origin remote
+removed. The real checkout is only read, never changed.
+
+Setup (optional setup_command) prepares the clone's dependencies before the
+coding agent starts, e.g. `uv sync`. It runs here, outside the agent's
+sandbox and with network access, because installing needs both; the agent
+itself never gets either. That makes it privileged, so it's constrained:
+- one package-manager command (SETUP_PROGRAMS), optionally behind `env
+  NAME=value`; no shell, no operators, no absolute or parent paths, no ~;
+- run with the clone as its working directory, without a shell, with
+  credential-looking variables removed, and with a timeout;
+- then checked: every setup_produces path must exist and resolve inside the
+  clone (so the agent's sandboxed tests can use it without reading ~).
+A failed or unverified setup fails the request before the agent runs.
 
 This module knows projects, paths and git. It knows nothing about Claude,
 ADK, Telegram or Linear.
 """
 
+import logging
 import os
 import re
+import shlex
 import subprocess
 import tomllib
 from pathlib import Path
@@ -31,6 +45,20 @@ from cycle_runner.work_requests import WorkRequest
 DEFAULT_CONFIG_PATH = "projects.toml"
 PROJECT_ID = re.compile(r"^[A-Z][A-Z0-9]*$")
 SHELL_OPERATORS = re.compile(r"[;&|<>`$\\\n]")
+BRANCH = re.compile(r"^[A-Za-z0-9._/][A-Za-z0-9._/-]*$")
+ENV_ASSIGNMENT = re.compile(r"^[A-Z_][A-Z0-9_]*=")
+# What a setup command may run: a package manager's install step, which puts
+# a project's dependencies in its own directory. Only these subcommands: e.g.
+# `uv run` would run anything.
+SETUP_PROGRAMS = {
+    "uv": {"sync"}, "npm": {"ci"}, "pnpm": {"install"}, "yarn": {"install"},
+    "poetry": {"install"}, "bundle": {"install"},
+}
+SETUP_TIMEOUT_SECONDS = 600
+# Removed from setup's environment: it needs the network, not our credentials.
+CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|AUTH|CLIENT_ID", re.IGNORECASE)
+
+log = logging.getLogger(__name__)
 
 
 class ProjectConfigError(Exception):
@@ -47,6 +75,10 @@ class ProjectConfig(BaseModel):
     repository: Path  # a local git checkout; only ever read (cloned)
     test_command: str  # run inside the clone; the only command the coding agent may run
     readable: tuple[Path, ...] = ()  # extra paths sandboxed tests may read (e.g. an interpreter)
+    branch: str | None = None  # the branch to clone; default: whatever the checkout has checked out
+    setup_command: str | None = None  # prepares dependencies in the clone, before the agent runs
+    setup_produces: tuple[str, ...] = ()  # clone-relative paths setup must create, inside the clone
+    test_success_pattern: str | None = None  # regex the agent's last test run output must match
 
     @field_validator("repository", mode="before")
     @classmethod
@@ -74,6 +106,66 @@ class ProjectConfig(BaseModel):
             raise ValueError("must be a single command without shell operators (the agent may run only it)")
         return value
 
+    @field_validator("branch")
+    @classmethod
+    def _branch(cls, value: str | None) -> str | None:
+        if value is not None and (not BRANCH.match(value) or ".." in value):
+            raise ValueError("must be a plain branch name")
+        return value
+
+    @field_validator("setup_command")
+    @classmethod
+    def _setup_command(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = " ".join(value.split())
+        if SHELL_OPERATORS.search(value) or any(c in value for c in "\"'"):
+            raise ValueError("must be a single command without shell operators or quoting")
+        words = value.split()
+        program, subcommand = _setup_program(words)
+        allowed = [f"{name} {sub}" for name, subs in sorted(SETUP_PROGRAMS.items()) for sub in sorted(subs)]
+        if subcommand not in SETUP_PROGRAMS.get(program, ()):
+            raise ValueError(
+                f"must be one of {allowed} (optionally behind env NAME=value), not {f'{program} {subcommand}'.strip()!r}"
+            )
+        for word in words:
+            argument = word.split("=", 1)[1] if ENV_ASSIGNMENT.match(word) else word
+            if argument.startswith(("/", "~")) or ".." in Path(argument).parts:
+                raise ValueError(f"must stay inside the clone: {word!r} names a path outside it")
+        return value
+
+    @field_validator("setup_produces")
+    @classmethod
+    def _setup_produces(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for path in value:
+            if path.startswith(("/", "~")) or ".." in Path(path).parts:
+                raise ValueError(f"must be paths inside the clone, not {path!r}")
+        return value
+
+    @field_validator("test_success_pattern")
+    @classmethod
+    def _test_success_pattern(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError(f"not a valid regular expression: {exc}") from None
+        return value
+
+    @model_validator(mode="after")
+    def _setup_consistent(self) -> "ProjectConfig":
+        if self.setup_produces and not self.setup_command:
+            raise ValueError("setup_produces needs a setup_command")
+        return self
+
+
+def _setup_program(words: list[str]) -> tuple[str, str]:
+    """The program a setup command runs and its subcommand, after any `env NAME=value ...`."""
+    rest = words[1:] if words and words[0] == "env" else words
+    while rest and ENV_ASSIGNMENT.match(rest[0]):
+        rest = rest[1:]
+    return (rest[0] if rest else ""), (rest[1] if len(rest) > 1 else "")
+
 
 class ProjectsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -90,6 +182,10 @@ class ProjectsConfig(BaseModel):
         home = Path.home()
         if path == Path("/") or path == home or path in home.parents:
             raise ValueError("must be a dedicated directory, not /, the home directory or above it")
+        claude_temp = {Path(f"/tmp/claude-{os.getuid()}"), Path(f"/private/tmp/claude-{os.getuid()}")}
+        if any(path == area or area in path.parents for area in claude_temp):
+            # The agent's sandbox denies writes there, so the agent couldn't work in it.
+            raise ValueError("must not be inside Claude Code's temp area (/tmp/claude-<uid>)")
         return path
 
     @field_validator("projects")
@@ -152,10 +248,45 @@ class WorkspaceResolver:
         if workspace.exists():
             raise WorkspaceError(f"{wr} already has a workspace at {workspace}")
         root.mkdir(parents=True, exist_ok=True)
-        self._git("clone", "--quiet", "--no-hardlinks", str(repository), str(workspace))
+        branch = ["--branch", project.branch] if project.branch else []
+        self._git("clone", "--quiet", "--no-hardlinks", *branch, str(repository), str(workspace))
         self._git("-C", str(workspace), "remote", "remove", "origin")  # nowhere to push to
+        if project.setup_command:
+            self._setup(project, workspace)
 
-        return ExecutionWorkspace(path=workspace, test_command=project.test_command, readable=project.readable)
+        return ExecutionWorkspace(
+            path=workspace, test_command=project.test_command, readable=project.readable,
+            test_success_pattern=project.test_success_pattern,
+        )
+
+    @staticmethod
+    def _setup(project: ProjectConfig, workspace: Path) -> None:
+        """Run the setup command in the clone (no shell, no credentials), then check what it made.
+
+        The clone is left in place whatever happens, for inspection.
+        """
+        environ = {name: value for name, value in os.environ.items() if not CREDENTIAL_NAME.search(name)}
+        log.info("setup in %s: %s", workspace, project.setup_command)
+        try:
+            result = subprocess.run(
+                shlex.split(project.setup_command), cwd=workspace, env=environ,
+                capture_output=True, text=True, timeout=SETUP_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            raise WorkspaceError(f"setup failed: timed out after {SETUP_TIMEOUT_SECONDS}s") from None
+        except OSError as exc:
+            raise WorkspaceError(f"setup failed: {exc.strerror or exc}") from None
+        if result.returncode != 0:
+            detail = ((result.stderr or result.stdout).strip().splitlines() or ["no output"])[-1]
+            raise WorkspaceError(f"setup failed (exit {result.returncode}): {detail}")
+        root = workspace.resolve()
+        for produced in project.setup_produces:
+            path = (workspace / produced).resolve()
+            if not path.exists():
+                raise WorkspaceError(f"setup failed: it didn't create {produced}")
+            if path != root and root not in path.parents:
+                # e.g. a venv whose interpreter is a symlink into ~: the sandbox can't read it
+                raise WorkspaceError(f"setup failed: {produced} resolves outside the workspace ({path})")
 
     @staticmethod
     def _git(*args: str) -> None:

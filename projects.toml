@@ -12,17 +12,38 @@
 #                 It is the only command the coding agent may run, so no shell
 #                 operators (use `uv run --directory backend ...`, not `cd && ...`).
 #   readable      optional: extra paths sandboxed tests may read
+#   branch        optional: the branch to clone (default: whatever the checkout
+#                 has checked out, which may be someone's feature branch)
+#   setup_command optional: prepares dependencies in the clone before the agent
+#                 starts. Runs outside the agent's sandbox, with network, so
+#                 it's restricted to a package manager's install step (uv sync,
+#                 npm ci, ...), optionally behind `env NAME=value`, with paths
+#                 inside the clone only. A failure fails the request unstarted.
+#   setup_produces optional: clone-relative paths setup must create; each must
+#                 resolve inside the clone (a venv symlinked into ~ would be
+#                 unreadable in the sandbox)
+#   test_success_pattern optional: a regex the agent's last test run output must
+#                 match (checked by the executor, not taken from the agent)
 #
-# Not yet runnable by the Claude executor: V1.0's sandbox denies network and
-# reads under ~, and these projects' tests need their dependencies (uv caches,
-# managed Pythons, Gradle) set up first. That's the next milestone. The CLI
-# still runs only the FakeExecutor.
+# Runnable by the Claude executor: MT (V1.2). The others still need their
+# dependencies set up the same way before an agent can run their tests.
 
 workspace_root = "~/.local/share/cycle-runner/workspaces"
 
 [projects.MT]    # missing-table
 repository = "~/gitrepos/missing-table"
-test_command = "uv run --directory backend pytest -q"
+branch = "main"
+# A workspace-local interpreter (.python) and venv (backend/.venv), so the
+# sandboxed tests never need ~/.local/share/uv or ~/.cache.
+setup_command = "env UV_PYTHON_INSTALL_DIR=.python UV_PYTHON_PREFERENCE=only-managed uv sync --directory backend --frozen"
+setup_produces = ["backend/.venv/bin/python"]
+# Unit tests only, as MT's CI runs them, from backend/ (conftest loads ../.env.test).
+#   PATH=/usr/bin:/bin   keeps `op` off PATH: one MT test shells out to it and
+#                        the sandbox can't run it (PermissionError)
+#   -o addopts=          drops -v, coverage and --strict-config noise from pytest.ini
+#   --capture=no         pytest's capture dies in the sandbox (exit 120)
+test_command = "/usr/bin/env -C backend PATH=/usr/bin:/bin .venv/bin/python -m pytest tests/unit -o addopts= -o log_cli=false -n auto -q --capture=no"
+test_success_pattern = '^\d+ passed(, \d+ (skipped|deselected|xfailed|xpassed|warnings?))* in [\d.]+s'
 
 [projects.MTA]   # missing-table-android
 repository = "~/gitrepos/missing-table-android"
