@@ -41,7 +41,7 @@ query ($team: String!, $after: String) {
           nodes {
             identifier title estimate priorityLabel createdAt
             state { name type }
-            labels { nodes { name } }
+            labels { nodes { name parent { name } } }
             inverseRelations { nodes { type issue { identifier state { type } } } }
           }
         }
@@ -61,7 +61,7 @@ query ($id: String!) {
     priorityLabel
     state { name type }
     assignee { name }
-    labels { nodes { name } }
+    labels { nodes { name parent { name } } }
     cycle { number }
     inverseRelations { nodes { type issue { identifier state { type } } } }
   }
@@ -72,6 +72,21 @@ query ($id: String!) {
 @functools.cache
 def _client() -> LinearClient:
     return LinearClient.from_env()
+
+
+# Linear's label group whose label says which project (repository) an issue
+# belongs to. The project ids themselves (MT, TRD, ...) are data, not code.
+PROJECT_LABEL_GROUP = "repo"
+
+
+def _project(issue: dict) -> str | None:
+    """The issue's label from the project label group, if it has exactly one."""
+    projects = [
+        label["name"]
+        for label in issue["labels"]["nodes"]
+        if (label.get("parent") or {}).get("name") == PROJECT_LABEL_GROUP
+    ]
+    return projects[0] if len(projects) == 1 else None
 
 
 def _team_key() -> str:
@@ -104,7 +119,8 @@ async def get_cycle_status() -> dict:
         end_date, today, all as YYYY-MM-DD, days_remaining, progress_percent), "counts" (number of
         issues per status, all issues), "open_issues" (every issue not yet done
         or canceled, each with id, title, status, estimate, priority, labels,
-        age_days, and blocked_by: ids of open issues blocking it) and
+        project (the repository it belongs to), age_days, and blocked_by: ids
+        of open issues blocking it) and
         "in_progress" (ids of issues being worked on now). Or an "error" key if
         the cycle can't be read.
     """
@@ -139,6 +155,7 @@ async def get_cycle_status() -> dict:
                 "estimate": issue["estimate"],
                 "priority": issue["priorityLabel"],
                 "labels": [label["name"] for label in issue["labels"]["nodes"]],
+                "project": _project(issue),
                 "age_days": (today - date.fromisoformat(issue["createdAt"][:10])).days,
                 "blocked_by": _open_blockers(issue),
             }
@@ -161,8 +178,8 @@ async def get_issue(issue_id: str) -> dict:
         issue_id: The issue's id, like "SB-123".
 
     Returns:
-        dict: id, title, status, estimate, priority, assignee, labels, cycle
-        (number), blocked_by (ids of open issues blocking it) and description
+        dict: id, title, status, estimate, priority, assignee, labels, project,
+        cycle (number), blocked_by (ids of open issues blocking it) and description
         (possibly shortened, see "description_truncated"). Or an "error" key if
         the issue can't be read.
     """
@@ -184,6 +201,7 @@ async def get_issue(issue_id: str) -> dict:
         "priority": issue["priorityLabel"],
         "assignee": (issue["assignee"] or {}).get("name"),
         "labels": [label["name"] for label in issue["labels"]["nodes"]],
+        "project": _project(issue),
         "cycle": int(issue["cycle"]["number"]) if issue["cycle"] else None,
         "blocked_by": _open_blockers(issue),
         "description": description[:DESCRIPTION_LIMIT],

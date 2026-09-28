@@ -59,6 +59,7 @@ def test_facts_and_titles_come_from_linear_not_the_model():
     assert candidate.title == "Finish login fix"
     assert candidate.facts.model_dump() == {
         "status": "In Progress", "priority": "High", "estimate": 2, "age_days": 5, "blocked_by": [],
+        "project": None,
     }
     assert candidate.rationale == "why SB-1"
 

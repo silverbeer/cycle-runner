@@ -8,7 +8,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from cycle_runner.claude_executor import Workspace, python_for_tests
+from cycle_runner.claude_executor import python_for_tests
+from cycle_runner.executor import ExecutionWorkspace
 
 FILES = {
     "README.md": "# hello\n\nA tiny package used to test Cycle Runner's coding agent.\n",
@@ -38,8 +39,8 @@ FILES = {
 }
 
 
-def make_repo(path: Path, extra_files: dict[str, str] | None = None) -> Workspace:
-    """Create the repository at `path`, commit it, and describe it as a Workspace."""
+def make_repo(path: Path, extra_files: dict[str, str] | None = None) -> ExecutionWorkspace:
+    """Create the repository at `path`, commit it, and describe it as an ExecutionWorkspace."""
     path.mkdir(parents=True)
     for name, content in {**FILES, **(extra_files or {})}.items():
         (path / name).parent.mkdir(parents=True, exist_ok=True)
@@ -53,19 +54,19 @@ def make_repo(path: Path, extra_files: dict[str, str] | None = None) -> Workspac
     ):
         subprocess.run(command, cwd=path, check=True, capture_output=True)
     python = python_for_tests()
-    return Workspace(
+    return ExecutionWorkspace(
         path=path,
         test_command=f"{python} -m unittest discover -s tests -v",
         readable=(python.parent.parent,),  # the interpreter's install, so sandboxed tests can start
     )
 
 
-def run_tests(workspace: Workspace) -> subprocess.CompletedProcess:
+def run_tests(workspace: ExecutionWorkspace) -> subprocess.CompletedProcess:
     """Run the workspace's tests from the test harness (not the agent)."""
     return subprocess.run(workspace.test_command.split(), cwd=workspace.path, capture_output=True, text=True)
 
 
-def changed_files(workspace: Workspace) -> list[str]:
+def changed_files(workspace: ExecutionWorkspace) -> list[str]:
     result = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"], cwd=workspace.path,
         capture_output=True, text=True, check=True,

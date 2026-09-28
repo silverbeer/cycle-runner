@@ -15,7 +15,6 @@ from claude_agent_sdk import CLIConnectionError, ResultMessage
 from cycle_runner import claude_executor
 from cycle_runner.claude_executor import (
     ClaudeCodeExecutor,
-    Workspace,
     build_options,
     build_prompt,
     check_tool_call,
@@ -24,6 +23,7 @@ from cycle_runner.claude_executor import (
 )
 from cycle_runner.executor import run_request
 from cycle_runner.work_requests import WorkRequestStore
+from conftest import FixedWorkspace
 from disposable_repo import make_repo
 
 
@@ -235,7 +235,7 @@ def test_execute_reports_what_the_agent_changed(workspace, work_request_db, monk
 
     monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result()))
 
-    result = ClaudeCodeExecutor(workspace).execute(request)
+    result = ClaudeCodeExecutor().execute(request, workspace)
 
     assert result.outcome == "completed"
     assert result.details["files_changed"] == ["src/hello.py"]
@@ -252,7 +252,7 @@ def test_an_sdk_failure_is_a_failed_result_not_a_crash(workspace, work_request_d
 
     monkeypatch.setattr(claude_executor, "query", broken)
 
-    result = ClaudeCodeExecutor(workspace).execute(request)
+    result = ClaudeCodeExecutor().execute(request, workspace)
 
     assert result.outcome == "failed"
     assert "could not run: CLIConnectionError" in result.message
@@ -266,20 +266,21 @@ def test_the_runner_owns_the_lifecycle_around_the_claude_executor(workspace, wor
         _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result()),
     )
 
-    done, executed = run_request(store, ClaudeCodeExecutor(workspace), request.work_request_id)
+    resolver = FixedWorkspace(workspace)
+    done, executed = run_request(store, ClaudeCodeExecutor(), resolver, request.work_request_id)
 
     assert executed and done.status == "completed"
     assert done.claimed_by.startswith("claude-code@")
     assert done.result_message.startswith("Added greet(). (tests passed")
-    again, executed_again = run_request(store, ClaudeCodeExecutor(workspace), request.work_request_id)
+    again, executed_again = run_request(store, ClaudeCodeExecutor(), resolver, request.work_request_id)
     assert executed_again is False and again.status == "completed"
 
 
 def test_the_model_can_be_configured(monkeypatch, workspace):
     monkeypatch.setenv("CYCLE_RUNNER_CODING_MODEL", "claude-haiku-4-5")
-    assert ClaudeCodeExecutor(workspace).model == "claude-haiku-4-5"
+    assert ClaudeCodeExecutor().model == "claude-haiku-4-5"
     monkeypatch.delenv("CYCLE_RUNNER_CODING_MODEL")
-    assert ClaudeCodeExecutor(workspace).model == "claude-sonnet-5"
+    assert ClaudeCodeExecutor().model == "claude-sonnet-5"
 
 
 def test_a_failed_run_is_reported_from_its_result_not_as_a_crash(workspace, work_request_db, monkeypatch):
@@ -294,7 +295,7 @@ def test_a_failed_run_is_reported_from_its_result_not_as_a_crash(workspace, work
 
     monkeypatch.setattr(claude_executor, "query", out_of_turns)
 
-    result = ClaudeCodeExecutor(workspace).execute(request)
+    result = ClaudeCodeExecutor().execute(request, workspace)
 
     assert result.outcome == "failed"
     assert result.message == "The coding agent stopped: error_max_turns. Reached maximum number of turns (1)"

@@ -26,6 +26,9 @@ acts as Product Owner / Scrum Master for a weekly engineering cycle.
 - **V1.0**: `ClaudeCodeExecutor`, a real Claude coding agent (Claude Agent SDK)
   confined to a disposable workspace, returning a structured result. See
   [V1.0](#v10).
+- **V1.1**: projects. A work request knows its project (Linear's repo label),
+  `projects.toml` maps it to a repository and test command, and the runner
+  resolves a fresh clone as the executor's workspace. See [V1.1](#v11).
 
 ```
 Python 3.14 → uv → google-adk → LiteLLM → Ollama → gemma4:12b
@@ -105,6 +108,7 @@ called the tool) and 5 general ones (0/5 did).
 | `CYCLE_RUNNER_DB` | `data/cycle-runner.db` | SQLite file holding work requests (gitignored) |
 | `CYCLE_RUNNER_CODING_MODEL` | `claude-sonnet-5` | Model for `ClaudeCodeExecutor` |
 | `CLAUDE_CODE_OAUTH_TOKEN` | none | Claude credential for the coding agent; pass it only to runs that need it |
+| `CYCLE_RUNNER_PROJECTS` | `projects.toml` | Project workspace configuration |
 | `TELEGRAM_BOT_TOKEN` | none (required for Telegram) | Bot token from @BotFather |
 | `TELEGRAM_ALLOWED_USER_IDS` | empty, so nobody is allowed | Comma-separated Telegram user ids allowed to chat |
 
@@ -1115,4 +1119,144 @@ commands, K3s, leases, retries, A2A, or multi-agent orchestration.
 - **Persist `details`**, and give the result a place for a diff or branch.
 - **The CLI:** a way to run `ClaudeCodeExecutor` on a configured workspace,
   once workspaces exist.
+
+## V1.1
+
+Cycle Runner works across several projects (MT, TRD, BET, JT, MTA, QB, …)
+without the executor knowing any of them. The question V1.1 answers: *given
+an approved work request for project X, where should the coding agent work,
+and how is the work checked?*
+
+```
+Linear issue ──repo label──► WorkRequest.project_id ("MT")        set at approval
+                                     │
+executor.run_request / run_next      │  the runner assembles the context
+        │ claim                      ▼
+        ├──────────► WorkspaceResolver ──► projects.toml [projects.MT]
+        │                  │  repository + test_command
+        │                  ▼
+        │            fresh clone: workspace_root/WR-000002 (origin removed)
+        │                  │
+        │ start            ▼ ExecutionWorkspace(path, test_command, readable)
+        └──────────► Executor.execute(request, workspace)   Fake or Claude; project-agnostic
+```
+
+### How a work request knows its project
+
+Every SB issue has exactly one label in Linear's **`repo` label group** (MT,
+TRD, …); in the current cycle that's 40 of 40. It's a Linear fact:
+
+1. `get_cycle_status` / `get_issue` report it as `project`.
+2. The recommendation's Linear facts carry it.
+3. Approval copies it into `WorkRequest.project_id` (schema version 3, a
+   nullable column).
+
+The approval side needs no configuration. An issue with no repo label, or
+several, gives `project_id = None`.
+
+### Project configuration
+
+`projects.toml` at the repository root (override with
+`CYCLE_RUNNER_PROJECTS`), read with the stdlib `tomllib`, so there's no new
+dependency:
+
+```toml
+workspace_root = "~/.local/share/cycle-runner/workspaces"
+
+[projects.MT]
+repository   = "~/gitrepos/missing-table"
+test_command = "uv run --directory backend pytest -q"
+```
+
+It's validated when loaded (Pydantic; unknown keys are refused):
+
+- absolute paths (`~` allowed);
+- a dedicated `workspace_root`: not `/`, not your home directory or above
+  it, and not inside a repository (or vice versa);
+- uppercase project ids;
+- a single `test_command` with no shell operators. It's the only command the
+  agent may run, so `cd x && …` could never work anyway.
+
+The committed file lists what was verified on this machine: MT, MTA, TRD,
+JT. BET and QB aren't cloned here yet.
+
+### Workspaces: always a fresh clone
+
+`WorkspaceResolver.resolve(request)`:
+
+1. Checks the request has a project and that the project is configured.
+2. Checks the repository is a git checkout.
+3. Makes `workspace_root/WR-xxxxxx` (never reusing one).
+4. Clones into it with `git clone --no-hardlinks`, then removes the clone's
+   `origin` remote.
+
+The real checkout is **only read**. The executor gets an `ExecutionWorkspace`
+pointing at the clone, and V1.0's sandbox confines the agent to it. The
+sandbox itself is unchanged.
+
+### Who owns what
+
+| Component | Owns |
+|---|---|
+| Runner (`executor.py`) | the lifecycle (claim, start, finish) and assembling the context: resolve a workspace, then execute |
+| `WorkspaceResolver` (`projects.py`) | project id → configuration → a validated, fresh workspace. Knows nothing of Claude, ADK, Telegram or Linear. |
+| Executor (`ClaudeCodeExecutor`, `FakeExecutor`) | doing the work in the workspace it's given. Knows nothing of projects or configuration. |
+
+`Executor.execute` now takes `(request, workspace)`: the runner hands the
+workspace over instead of the executor being built around one. A request
+that can't be resolved (no project, unknown project, clone failure) goes
+`claimed → failed` ("Not started: …"), a new transition. It never ran, so it
+isn't `running`, and releasing it would only fail again. The executor, and so
+Claude, is never invoked.
+
+### Adding a project
+
+Add a `[projects.X]` table where X is the issue's repo label in Linear.
+There are no code changes. `tests/test_boundaries.py` fails if a string
+constant equal to a project id appears in the code, and
+`test_adding_a_project_is_only_configuration` runs a never-seen project
+end to end from configuration alone.
+
+### Tests
+
+- **`tests/test_projects.py`** (CI):
+  - loading, and 13 kinds of invalid configuration;
+  - MT, TRD and BET each resolving to a clone of their own repository, with
+    the origin byte-for-byte untouched and no remote;
+  - no project, unknown project, not a checkout, or an existing workspace;
+  - the runner handing over the resolved workspace;
+  - Claude never invoked for unresolvable requests;
+  - a new project by configuration alone.
+
+  All repositories are disposable. No test touches a real repository or your
+  database.
+- **`tests/test_claude_live.py`** (`-m claude`): a `DEMO` work request goes
+  from its project id through configuration, the resolver and a fresh clone,
+  to Claude, passing tests and `completed`. The configured origin is verified
+  unchanged.
+
+### ⚠️ Existing approvals
+
+`WR-000001` (SB-640) was approved before V1.1, so its `project_id` is `NULL`.
+If the executor CLI claims it, it fails to start ("has no project"). Linear
+says SB-640 is `MT`, but nothing sets that automatically.
+
+### Not in V1.1
+
+- **Running real projects' tests.** The sandbox denies network and reads
+  under `~`, so `uv run pytest` can't reach its caches or install
+  dependencies. The configuration describes real projects; executing them
+  needs dependency setup, which comes next.
+- Also not here: branches, commits, push or PRs; Linear writes; fetching the
+  full issue description; a CLI option to run `ClaudeCodeExecutor` (the CLI
+  still runs `FakeExecutor`).
+
+### Deferred to V1.2
+
+- **Issue context:** the runner (not the executor) fetches the issue
+  description from Linear for the task.
+- **Workspace setup:** dependencies inside the sandbox, and per-project
+  readable paths such as uv caches.
+- **Cleaning up old workspaces.**
+- **What to do with pre-V1.1 requests** that have no project.
 

@@ -112,7 +112,7 @@ def test_only_approval_and_the_executor_can_reach_the_work_request_store():
         if path.name != "work_requests.py"
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
-    assert sorted(users) == ["approval.py", "claude_executor.py", "executor.py", "fake_executor.py"]
+    assert sorted(users) == ["approval.py", "claude_executor.py", "executor.py", "fake_executor.py", "projects.py"]
 
 
 @pytest.mark.parametrize(
@@ -139,7 +139,9 @@ def test_the_agent_has_no_tool_that_touches_work_requests():
 # --- V0.9: the executor stands alone ------------------------------------------
 
 
-@pytest.mark.parametrize("module", ["executor.py", "fake_executor.py", "work_requests.py", "claude_executor.py"])
+@pytest.mark.parametrize(
+    "module", ["executor.py", "fake_executor.py", "work_requests.py", "claude_executor.py", "projects.py"]
+)
 def test_execution_modules_cannot_reach_adk_telegram_linear_or_the_conversation(module):
     imports = _imported_modules(PACKAGE / module)
     forbidden = (
@@ -163,8 +165,9 @@ def test_only_the_executor_cli_knows_which_executor_exists():
 
 def test_the_conversation_side_cannot_start_execution():
     users = [path.name for path in _modules() if "cycle_runner.executor" in _imported_modules(path)]
-    # The executors implement the interface; nothing in the Telegram/ADK path imports it.
-    assert sorted(users) == ["claude_executor.py", "fake_executor.py"]
+    # The executors implement the interface and the resolver produces its
+    # workspaces; nothing in the Telegram/ADK path imports it.
+    assert sorted(users) == ["claude_executor.py", "fake_executor.py", "projects.py"]
 
 
 def test_importing_the_package_does_not_load_adk():
@@ -195,4 +198,45 @@ def test_the_claude_executor_never_touches_lifecycle_state_or_starts_processes()
 def test_the_runner_does_not_know_about_claude():
     imports = _imported_modules(PACKAGE / "executor.py")
     assert not [n for n in imports if n.startswith(("claude_agent_sdk", "cycle_runner.claude_executor"))]
+
+
+# --- V1.1: projects live in configuration, not code ---------------------------
+
+
+PROJECT_IDS = {"MT", "TRD", "BET", "JT", "MTA", "QB", "DEMO"}
+
+
+def test_no_project_is_named_in_the_code():
+    # Adding a project must be a configuration change. Any string constant that
+    # is exactly a project id (e.g. `if project == "MT"`) would mean project
+    # logic in Python. Prose in docstrings doesn't count.
+    found = {
+        path.name: sorted(
+            node.value for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.Constant) and node.value in PROJECT_IDS
+        )
+        for path in _modules()
+    }
+    assert {name: ids for name, ids in found.items() if ids} == {}
+
+
+def test_the_claude_executor_knows_nothing_about_project_configuration():
+    imports = _imported_modules(PACKAGE / "claude_executor.py")
+    assert "cycle_runner.projects" not in imports and "tomllib" not in imports
+    source = (PACKAGE / "claude_executor.py").read_text()
+    for word in ("projects.toml", "load_projects", "WorkspaceResolver", "project_id"):
+        assert word not in source, word
+
+
+def test_the_runner_resolves_workspaces_through_the_interface_only():
+    # executor.py's library code depends on the WorkspaceResolver protocol; only
+    # its CLI entry point picks the configuration-backed resolver.
+    source = (PACKAGE / "executor.py").read_text()
+    library, _, cli = source.partition("# --- command line")
+    assert "cycle_runner.projects" not in library and "cycle_runner.projects" in cli
+
+
+def test_only_the_resolver_reads_project_configuration():
+    users = [path.name for path in _modules() if "tomllib" in _imported_modules(path)]
+    assert users == ["projects.py"]
 

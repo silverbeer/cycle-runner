@@ -423,7 +423,10 @@ def _pending_state(turn_shown=1, issue="TEST-2"):
             "recommendation": {
                 "recommended_issue_id": issue,
                 "cycle_number": 42,
-                "candidates": [{"issue_id": issue, "title": "Fix the flaky login", "rationale": "In progress."}],
+                "candidates": [{
+                    "issue_id": issue, "title": "Fix the flaky login", "rationale": "In progress.",
+                    "facts": {"project": "DEMO"},
+                }],
             },
         },
     }

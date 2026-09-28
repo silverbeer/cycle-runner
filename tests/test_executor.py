@@ -26,10 +26,16 @@ def store(work_request_db):
     return WorkRequestStore(work_request_db)
 
 
-def _approve(store, n=1, issue_id="SB-640"):
+@pytest.fixture
+def resolver(fixed_workspace):
+    return fixed_workspace
+
+
+def _approve(store, n=1, issue_id="SB-640", project_id="DEMO"):
     request, _ = store.create_for_approval(
         recommendation_id=f"rec-{n}", issue_id=issue_id, approved_by="telegram:1",
         approved_at=datetime.now(UTC), cycle_number=10, title_at_approval="t", rationale="r",
+        project_id=project_id,
     )
     return request.work_request_id
 
@@ -40,11 +46,12 @@ class Spy:
     name = "spy"
 
     def __init__(self, outcome="completed", error=None):
-        self.received = []
+        self.received, self.workspaces = [], []
         self.outcome, self.error = outcome, error
 
-    def execute(self, request):
+    def execute(self, request, workspace):
         self.received.append(request)
+        self.workspaces.append(workspace)
         if self.error:
             raise self.error
         return ExecutionResult(outcome=self.outcome, message=f"spy {self.outcome}")
@@ -53,10 +60,10 @@ class Spy:
 # --- the lifecycle through the runner -----------------------------------------
 
 
-def test_a_pending_request_runs_to_completed(store):
+def test_a_pending_request_runs_to_completed(store, resolver):
     wr = _approve(store)
 
-    done = run_next(store, FakeExecutor())
+    done = run_next(store, FakeExecutor(), resolver)
 
     assert (done.work_request_id, done.status) == (wr, "completed")
     assert done.result_message == f"Fake execution completed for {wr} (SB-640). No real work was done."
@@ -65,38 +72,38 @@ def test_a_pending_request_runs_to_completed(store):
     assert store.get(wr) == done  # durable
 
 
-def test_the_executor_receives_the_claimed_running_request(store):
+def test_the_executor_receives_the_claimed_running_request(store, resolver):
     wr = _approve(store)
     spy = Spy()
 
-    run_next(store, spy)
+    run_next(store, spy, resolver)
 
     (received,) = spy.received
     assert (received.work_request_id, received.issue_id, received.status) == (wr, "SB-640", "running")
     assert received.claimed_by.startswith("spy@")
 
 
-def test_no_pending_requests_is_handled_cleanly(store):
+def test_no_pending_requests_is_handled_cleanly(store, resolver):
     spy = Spy()
-    assert run_next(store, spy) is None
+    assert run_next(store, spy, resolver) is None
     assert spy.received == []
 
 
-def test_a_completed_request_never_executes_again(store):
+def test_a_completed_request_never_executes_again(store, resolver):
     wr = _approve(store)
     spy = Spy()
 
-    first, executed_first = run_request(store, spy, wr)
-    second, executed_second = run_request(store, spy, wr)
+    first, executed_first = run_request(store, spy, resolver, wr)
+    second, executed_second = run_request(store, spy, resolver, wr)
 
     assert (executed_first, executed_second) == (True, False)
     assert len(spy.received) == 1  # the second call executed nothing
     assert second == first and second.status == "completed"
-    assert run_next(store, spy) is None
+    assert run_next(store, spy, resolver) is None
 
 
 @pytest.mark.parametrize("status", ["claimed", "running", "failed"])
-def test_a_request_that_is_not_pending_is_left_alone(store, status):
+def test_a_request_that_is_not_pending_is_left_alone(store, status, resolver):
     wr = _approve(store)
     store.claim(wr, "someone-else")
     if status in ("running", "failed"):
@@ -105,44 +112,46 @@ def test_a_request_that_is_not_pending_is_left_alone(store, status):
         store.finish(wr, "failed", "boom")
     spy = Spy()
 
-    request, executed = run_request(store, spy, wr)
+    request, executed = run_request(store, spy, resolver, wr)
 
     assert executed is False and request.status == status and spy.received == []
 
 
-def test_running_an_unknown_request_is_an_error(store):
+def test_running_an_unknown_request_is_an_error(store, resolver):
     with pytest.raises(InvalidTransition, match="does not exist"):
-        run_request(store, Spy(), "WR-000042")
+        run_request(store, Spy(), resolver, "WR-000042")
 
 
-def test_an_executor_that_raises_is_recorded_as_failed(store):
+def test_an_executor_that_raises_is_recorded_as_failed(store, resolver):
     wr = _approve(store)
 
-    failed = run_next(store, Spy(error=RuntimeError("tests exploded")))
+    failed = run_next(store, Spy(error=RuntimeError("tests exploded")), resolver)
 
     assert failed.status == "failed"
     assert failed.result_message == "spy raised RuntimeError: tests exploded"
-    assert run_next(store, Spy()) is None  # a failed request isn't retried
+    assert run_next(store, Spy(), resolver) is None  # a failed request isn't retried
 
 
-def test_an_executor_can_report_failure(store):
+def test_an_executor_can_report_failure(store, resolver):
     _approve(store)
-    assert run_next(store, Spy(outcome="failed")).status == "failed"
+    assert run_next(store, Spy(outcome="failed"), resolver).status == "failed"
 
 
 # --- FakeExecutor ---------------------------------------------------------------
 
 
-def test_the_fake_executor_is_deterministic(store):
+def test_the_fake_executor_is_deterministic(store, fixed_workspace):
     wr = _approve(store)
     request = store.claim(wr, "x")
+    workspace = fixed_workspace.workspace
 
-    assert FakeExecutor().execute(request) == FakeExecutor().execute(request)
+    assert FakeExecutor().execute(request, workspace) == FakeExecutor().execute(request, workspace)
 
 
-def test_the_fake_executor_performs_no_external_operations(store, monkeypatch):
+def test_the_fake_executor_performs_no_external_operations(store, monkeypatch, fixed_workspace):
     wr = _approve(store)
     request = store.claim(wr, "x")
+    workspace = fixed_workspace.workspace
 
     def forbidden(*args, **kwargs):
         raise AssertionError("external operation attempted")
@@ -152,7 +161,7 @@ def test_the_fake_executor_performs_no_external_operations(store, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr("builtins.open", forbidden)
 
-    result = FakeExecutor().execute(request)
+    result = FakeExecutor().execute(request, workspace)
 
     assert result.outcome == "completed"
 
@@ -175,60 +184,65 @@ def _process(db_path, code, blocked=()):
     return subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
 
 
-def test_crash_before_claim_leaves_the_request_pending(store, work_request_db):
+def test_crash_before_claim_leaves_the_request_pending(store, work_request_db, resolver):
     wr = _approve(store)
 
     crashed = _process(work_request_db, "os._exit(1)  # died before claiming anything")
 
     assert crashed.returncode == 1
     assert store.get(wr).status == "pending"
-    assert run_next(store, FakeExecutor()).status == "completed"  # the next run just picks it up
+    assert run_next(store, FakeExecutor(), resolver).status == "completed"  # the next run just picks it up
 
 
-def test_crash_after_claim_strands_it_claimed_until_released(store, work_request_db):
+def test_crash_after_claim_strands_it_claimed_until_released(store, work_request_db, resolver):
     wr = _approve(store)
 
     crashed = _process(work_request_db, "store.claim_next('fake@crashed:1'); os._exit(1)")
 
     assert crashed.returncode == 1
     assert store.get(wr).status == "claimed"
-    assert run_next(store, FakeExecutor()) is None  # not picked up again automatically
+    assert run_next(store, FakeExecutor(), resolver) is None  # not picked up again automatically
     store.release(wr)  # manual recovery: safe, the executor never ran
-    assert run_next(store, FakeExecutor()).status == "completed"
+    assert run_next(store, FakeExecutor(), resolver).status == "completed"
 
 
-def test_crash_while_running_strands_it_running_and_it_is_never_retried(store, work_request_db):
+def test_crash_while_running_strands_it_running_and_it_is_never_retried(store, work_request_db, resolver):
     wr = _approve(store)
     code = """
         from cycle_runner.executor import run_next
+        from cycle_runner.executor import ExecutionWorkspace
+        class Fixed:
+            def resolve(self, request):
+                return ExecutionWorkspace(path=__import__("pathlib").Path("."), test_command="true")
         class DiesMidWork:
             name = "dies"
-            def execute(self, request):
+            def execute(self, request, workspace):
                 os._exit(1)  # the process is killed while the work is in progress
-        run_next(store, DiesMidWork())
+        run_next(store, DiesMidWork(), Fixed())
     """
 
     crashed = _process(work_request_db, code)
 
     assert crashed.returncode == 1
     assert store.get(wr).status == "running"
-    assert run_next(store, FakeExecutor()) is None
-    assert run_request(store, FakeExecutor(), wr) == (store.get(wr), False)
+    assert run_next(store, FakeExecutor(), resolver) is None
+    assert run_request(store, FakeExecutor(), resolver, wr) == (store.get(wr), False)
     abandoned = store.abandon(wr, "executor process died")  # manual recovery: a human decides
     assert abandoned.status == "failed"
-    assert run_next(store, FakeExecutor()) is None  # still never retried
+    assert run_next(store, FakeExecutor(), resolver) is None  # still never retried
 
 
 # --- restart and independence ---------------------------------------------------
 
 
-def test_another_process_sees_the_state_this_process_left(store, work_request_db):
+def test_another_process_sees_the_state_this_process_left(store, work_request_db, projects_config):
     wr = _approve(store)
 
     runner = _process(
         work_request_db,
         "from cycle_runner.executor import run_next; from cycle_runner.fake_executor import FakeExecutor;"
-        " print(run_next(store, FakeExecutor()).status)",
+        " from cycle_runner.projects import WorkspaceResolver, load_projects;"
+        f" print(run_next(store, FakeExecutor(), WorkspaceResolver(load_projects({str(projects_config)!r}))).status)",
     )
 
     assert runner.returncode == 0 and runner.stdout.strip() == "completed"
@@ -236,11 +250,12 @@ def test_another_process_sees_the_state_this_process_left(store, work_request_db
     assert reopened.status == "completed" and reopened.result_message.startswith("Fake execution completed")
 
 
-def test_the_executor_cli_runs_without_adk_telegram_linear_or_a_model(store, work_request_db):
+def test_the_executor_cli_runs_without_adk_telegram_linear_or_a_model(store, work_request_db, projects_config):
     wr = _approve(store)
     code = f"""
         import runpy
         os.environ["CYCLE_RUNNER_DB"] = {str(work_request_db)!r}
+        os.environ["CYCLE_RUNNER_PROJECTS"] = {str(projects_config)!r}
         sys.argv = ["cycle_runner.executor", "run"]
         try:
             runpy.run_module("cycle_runner.executor", run_name="__main__")
@@ -264,18 +279,18 @@ def _cli(*args):
     return executor_module.main(list(args))
 
 
-def test_cli_run_completes_the_next_request(store, capsys):
+def test_cli_run_completes_the_next_request(store, capsys, projects_config):
     wr = _approve(store)
     assert _cli("run") == 0
     assert f"{wr} SB-640 completed by fake@" in capsys.readouterr().out
 
 
-def test_cli_with_nothing_pending(store, capsys):
+def test_cli_with_nothing_pending(store, capsys, projects_config):
     assert _cli() == 0
     assert "No pending work requests." in capsys.readouterr().out
 
 
-def test_cli_run_request_twice_executes_once(store, capsys):
+def test_cli_run_request_twice_executes_once(store, capsys, projects_config):
     wr = _approve(store)
     _cli("run", "--request", wr)
     capsys.readouterr()

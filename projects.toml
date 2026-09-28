@@ -1,0 +1,44 @@
+# Cycle Runner projects: where each project's work happens, and how it's checked.
+#
+# A project id is the issue's label in Linear's "repo" label group (MT, TRD, ...).
+# Adding a project means adding a [projects.X] table here, with no code changes.
+#
+# For every work request the executor runs on, Cycle Runner makes a fresh clone
+# of the project's repository under workspace_root (e.g. .../WR-000002) and
+# removes its origin remote. The repository itself is only read, never changed.
+#
+#   repository    a local git checkout (~ allowed)
+#   test_command  the exact command that checks the work, run inside the clone.
+#                 It is the only command the coding agent may run, so no shell
+#                 operators (use `uv run --directory backend ...`, not `cd && ...`).
+#   readable      optional: extra paths sandboxed tests may read
+#
+# Not yet runnable by the Claude executor: V1.0's sandbox denies network and
+# reads under ~, and these projects' tests need their dependencies (uv caches,
+# managed Pythons, Gradle) set up first. That's the next milestone. The CLI
+# still runs only the FakeExecutor.
+
+workspace_root = "~/.local/share/cycle-runner/workspaces"
+
+[projects.MT]    # missing-table
+repository = "~/gitrepos/missing-table"
+test_command = "uv run --directory backend pytest -q"
+
+[projects.MTA]   # missing-table-android
+repository = "~/gitrepos/missing-table-android"
+test_command = "./gradlew test"
+
+[projects.TRD]   # trd
+repository = "~/gitrepos/trd"
+test_command = "uv run pytest -q"
+
+[projects.JT]    # janitor
+repository = "~/gitrepos/janitor"
+test_command = "uv run pytest -q"
+
+# BET (bet) and QB (qualityplaybook.dev) aren't cloned on this machine yet.
+# Add them the same way once they are, for example:
+#
+# [projects.BET]
+# repository = "~/gitrepos/bet"
+# test_command = "uv run pytest -q"

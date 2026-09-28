@@ -47,7 +47,7 @@ FAKE_CYCLE = {
     "progress": 0.5,
 }
 def fake_issue(identifier, title, state, state_type, estimate=1, priority="No priority",
-               created="2030-01-01", labels=(), blocked_by=()):
+               created="2030-01-01", labels=(), blocked_by=(), project=None):
     """One issue node as the cycle query returns it. blocked_by: (id, state_type) pairs."""
     return {
         "identifier": identifier,
@@ -56,7 +56,10 @@ def fake_issue(identifier, title, state, state_type, estimate=1, priority="No pr
         "priorityLabel": priority,
         "createdAt": f"{created}T12:00:00.000Z",
         "state": {"name": state, "type": state_type},
-        "labels": {"nodes": [{"name": name} for name in labels]},
+        "labels": {
+            "nodes": [{"name": name, "parent": None} for name in labels]
+            + ([{"name": project, "parent": {"name": "repo"}}] if project else [])
+        },
         "inverseRelations": {
             "nodes": [
                 {"type": "blocks", "issue": {"identifier": blocker, "state": {"type": blocker_type}}}
@@ -176,3 +179,45 @@ def call(name, **args):
     return LlmResponse(
         content=types.Content(role="model", parts=[types.Part(function_call=types.FunctionCall(name=name, args=args))])
     )
+
+
+# --- workspaces for executor tests ----------------------------------------------
+
+
+class FixedWorkspace:
+    """A WorkspaceResolver that hands every request the same workspace."""
+
+    def __init__(self, workspace):
+        self.workspace = workspace
+        self.resolved = []
+
+    def resolve(self, request):
+        self.resolved.append(request.work_request_id)
+        return self.workspace
+
+
+@pytest.fixture
+def fixed_workspace(tmp_path):
+    from cycle_runner.executor import ExecutionWorkspace
+
+    path = tmp_path / "workspace"
+    path.mkdir()
+    return FixedWorkspace(ExecutionWorkspace(path=path, test_command="true"))
+
+
+@pytest.fixture
+def projects_config(tmp_path, monkeypatch):
+    """A projects.toml with one project, DEMO, whose repository is a disposable repo."""
+    from disposable_repo import make_repo
+
+    origin = make_repo(tmp_path / "origin" / "demo")
+    config = tmp_path / "projects.toml"
+    config.write_text(
+        f'workspace_root = "{tmp_path / "workspaces"}"\n\n'
+        f"[projects.DEMO]\n"
+        f'repository = "{origin.path}"\n'
+        f'test_command = "{origin.test_command}"\n'
+        f'readable = ["{origin.readable[0]}"]\n'
+    )
+    monkeypatch.setenv("CYCLE_RUNNER_PROJECTS", str(config))
+    return config
