@@ -58,6 +58,12 @@ def _result(**overrides):
     return ResultMessage(**{**fields, **overrides})
 
 
+def _result_for(workspace, **report):
+    """A successful result whose report names this workspace's test command, as a real one does."""
+    return _result(structured_output={"outcome": "completed", "summary": "Added greet().", "tests_passed": True,
+                                      "tests_command": workspace.test_command, **report})
+
+
 def _tool_call(call_id, name, **tool_input):
     return AssistantMessage(content=[ToolUseBlock(id=call_id, name=name, input=tool_input)], model="m")
 
@@ -312,7 +318,7 @@ def test_execute_reports_what_the_agent_changed(workspace, work_request_db, monk
         seen["cwd"], seen["prompt"] = cwd, prompt
         (cwd / "src" / "hello.py").write_text("def greet(name):\n    return f'Hello, {name}!'\n")
 
-    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result(), _test_run(workspace)))
+    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result_for(workspace), _test_run(workspace)))
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
@@ -343,7 +349,7 @@ def test_the_runner_owns_the_lifecycle_around_the_claude_executor(workspace, wor
     request = _request(store)
     monkeypatch.setattr(
         claude_executor, "query",
-        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result(),
+        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result_for(workspace),
                     _test_run(workspace)),
     )
 
@@ -392,7 +398,7 @@ def test_the_agents_word_alone_is_not_enough(workspace, monkeypatch, work_reques
     request = _request(WorkRequestStore(work_request_db))
     monkeypatch.setattr(
         claude_executor, "query",
-        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result()),
+        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result_for(workspace)),
     )
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
@@ -425,7 +431,7 @@ def test_the_observed_test_runs(workspace, messages, pattern, problem):
 
     verdict = transcript.verdict(pattern)
     assert verdict is None if problem is None else problem in verdict
-    result = to_execution_result(_result(), ["src/hello.py"], transcript, pattern)
+    result = to_execution_result(_result_for(workspace), ["src/hello.py"], transcript, pattern)
     assert result.outcome == ("completed" if problem is None else "failed")
 
 
@@ -450,7 +456,7 @@ def test_test_byproducts_are_not_the_agents_changes(workspace, work_request_db, 
         (cwd / "pytest-of-someone" / "session.json").parent.mkdir()
         (cwd / "pytest-of-someone" / "session.json").write_text("{}")
 
-    monkeypatch.setattr(claude_executor, "query", _fake_query(tests_leave_files, _result(), _test_run(workspace)))
+    monkeypatch.setattr(claude_executor, "query", _fake_query(tests_leave_files, _result_for(workspace), _test_run(workspace)))
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
@@ -468,7 +474,7 @@ def test_new_files_the_agent_wrote_and_edits_to_existing_files_count(workspace, 
 
     messages = [_tool_call("w", "Write", file_path=str(workspace.path / "tests" / "test_greet.py")),
                 _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace)]
-    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result(), messages))
+    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result_for(workspace), messages))
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
@@ -482,3 +488,37 @@ def test_a_long_list_of_changes_is_shortened_in_the_message():
     result = to_execution_result(_result(), files)
     assert result.message.endswith("f9.py and 4 more)")
     assert result.details["files_changed"] == files
+
+
+def test_a_placeholder_report_is_not_accepted(workspace):
+    # Found live: after its real report failed the schema check three times, the
+    # agent sent {"summary": "test", "tests_command": "pytest"} and stopped.
+    transcript = _observed(workspace, _tool_call("r1", "StructuredOutput", outcome="completed"),
+                           *_test_run(workspace), _tool_call("r2", "StructuredOutput", summary="test"))
+
+    result = to_execution_result(_result_for(workspace, summary="test", tests_command="pytest"), ["src/hello.py"],
+                                 transcript)
+
+    assert result.outcome == "failed"
+    assert result.message == "The coding agent's report doesn't describe this run (it names `pytest`): test"
+    assert result.details["report_attempts"] == 2
+
+
+def test_the_prompt_says_how_to_report(workspace, work_request_db):
+    prompt = build_prompt(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
+    assert "StructuredOutput tool once with all four fields" in prompt and "placeholder" in prompt
+
+
+def test_the_agents_state_is_kept_beside_the_workspace_not_under_the_home_directory(workspace, work_request_db,
+                                                                                   monkeypatch):
+    # Found live: Claude Code keeps a transcript of every session under
+    # ~/.claude/projects/<workspace path>, out of sight of the run.
+    seen = {}
+    monkeypatch.setattr(claude_executor, "query",
+                        _fake_query(lambda cwd, p, o: seen.update(env=o.env), _result_for(workspace)))
+
+    ClaudeCodeExecutor().execute(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
+
+    state = workspace.path.with_name(workspace.path.name + ".claude")
+    assert seen["env"]["CLAUDE_CONFIG_DIR"] == str(state.resolve())
+    assert state.is_dir() and oct(state.stat().st_mode & 0o777) == "0o700"

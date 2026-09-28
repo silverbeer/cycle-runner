@@ -135,7 +135,11 @@ def build_prompt(task: ExecutionTask, workspace: ExecutionWorkspace) -> str:
         "(e.g. the passed/failed summary), not the exit code.\n\n"
         "You can't reach the network, other directories or other commands. "
         "Don't commit. Report outcome 'completed' only if the code parts are done and "
-        "the tests pass; otherwise report 'failed' and say why."
+        "the tests pass; otherwise report 'failed' and say why.\n\n"
+        "Finish by calling the StructuredOutput tool once with all four fields: outcome, "
+        "summary (plain text, at most about 1500 characters: what you changed, what the "
+        "tests showed, and anything left for a human), tests_passed, and tests_command "
+        "(exactly the command above). Never send placeholder values."
     )
 
 
@@ -218,11 +222,20 @@ def credential_variables(environ: dict[str, str]) -> list[str]:
     return sorted(name for name in environ if CREDENTIAL_NAME.search(name))
 
 
+def agent_state_dir(workspace: ExecutionWorkspace) -> Path:
+    """Where the agent's Claude Code keeps its state (the session transcript): beside
+    the workspace (WR-000001 -> WR-000001.claude), not hidden under ~/.claude."""
+    return workspace.path.with_name(workspace.path.name + ".claude")
+
+
 def build_options(workspace: ExecutionWorkspace, *, model: str, max_turns: int, max_budget_usd: float,
-                  environ: dict[str, str], scratch: Path | None = None) -> ClaudeAgentOptions:
+                  environ: dict[str, str], scratch: Path | None = None,
+                  state: Path | None = None) -> ClaudeAgentOptions:
     """scratch: a fresh, empty directory for Claude Code's own temp files (its Bash
     wrapper records each command's working directory there). Without a writable
-    one inside the sandbox, every command reports failure whatever it did."""
+    one inside the sandbox, every command reports failure whatever it did.
+    state: Claude Code's config directory for this run (session transcripts land
+    there). Default: the user's ~/.claude, which keeps a transcript per workspace."""
     root = str(workspace.path.resolve())
     scratch_dir = str(scratch.resolve()) if scratch else None
     credentials = credential_variables(environ)
@@ -279,6 +292,7 @@ def build_options(workspace: ExecutionWorkspace, *, model: str, max_turns: int, 
             "SHELL": "/bin/bash",
             # Claude Code's own temp files go in this run's scratch directory.
             **({name: scratch_dir for name in ("CLAUDE_CODE_TMPDIR", "TMPPREFIX")} if scratch_dir else {}),
+            **({"CLAUDE_CONFIG_DIR": str(state.resolve())} if state else {}),
         },
         output_format={"type": "json_schema", "schema": AgentReport.model_json_schema()},
         max_turns=max_turns,
@@ -304,6 +318,7 @@ class Transcript:
         self.calls = 0
         self.last_edit = 0  # the call number of the last Edit/Write attempt
         self.written: set[str] = set()  # file_path of every Edit/Write attempt, as given
+        self.report_attempts = 0  # StructuredOutput calls; the SDK rejects ones that miss the schema
         self.test_runs: list[tuple[int, str]] = []  # (call number, output)
         self._pending: dict[str, int] = {}
 
@@ -312,7 +327,9 @@ class Transcript:
             for block in message.content:
                 if isinstance(block, ToolUseBlock):
                     self.calls += 1
-                    if block.name in WRITE_TOOLS:
+                    if block.name == REPORT_TOOL:
+                        self.report_attempts += 1
+                    elif block.name in WRITE_TOOLS:
                         self.last_edit = self.calls
                         self.written.add(str(block.input.get("file_path", "")))
                     elif block.name == "Bash" and " ".join(str(block.input.get("command", "")).split()) == self.test_command:
@@ -336,6 +353,7 @@ class Transcript:
     def details(self) -> dict[str, Any]:
         return {
             "tool_calls": self.calls,
+            "report_attempts": self.report_attempts,
             "files_written_by_agent": sorted(self.written),
             "tests_observed": len(self.test_runs),
             "tests_output_tail": self.test_runs[-1][1][-self.OUTPUT_TAIL:] if self.test_runs else "",
@@ -391,6 +409,15 @@ def to_execution_result(message: ResultMessage | None, files_changed: list[str],
     details |= {"tests_passed": report.tests_passed, "tests_command": report.tests_command, "summary": report.summary}
     if report.outcome != "completed" or not report.tests_passed:
         return ExecutionResult(outcome="failed", message=f"The coding agent reports failure: {report.summary}", details=details)
+    if transcript and " ".join(report.tests_command.split()) != transcript.test_command:
+        # Found live: after its real report was rejected by the schema check, the
+        # agent sent placeholders ("summary": "test", "tests_command": "pytest").
+        return ExecutionResult(
+            outcome="failed",
+            message=f"The coding agent's report doesn't describe this run (it names `{report.tests_command}`): "
+                    f"{report.summary}",
+            details=details,
+        )
     if not files_changed:
         # Possibly right (the work may already be done), but nothing was delivered: a human decides.
         return ExecutionResult(
@@ -458,10 +485,12 @@ class ClaudeCodeExecutor:
                          transcript: Transcript) -> ResultMessage | None:
         result = None
         # A fresh temp directory per run for Claude Code's own files, removed after.
+        state = agent_state_dir(workspace)
+        state.mkdir(mode=0o700, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="cycle-runner-agent-") as scratch:
             options = build_options(
                 workspace, model=self.model, max_turns=self.max_turns,
-                max_budget_usd=self.max_budget_usd, environ=dict(os.environ), scratch=Path(scratch),
+                max_budget_usd=self.max_budget_usd, environ=dict(os.environ), scratch=Path(scratch), state=state,
             )
             try:
                 with _without_parent_session():

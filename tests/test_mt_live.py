@@ -13,6 +13,7 @@ workspace root. The MT checkout is only cloned; the test proves it's
 unchanged. Linear is only read. Real model calls: about a dollar or two.
 """
 
+import json
 import os
 import subprocess
 from datetime import UTC, datetime
@@ -21,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from cycle_runner.claude_executor import ClaudeCodeExecutor
-from cycle_runner.executor import run_request
+from cycle_runner.executor import ExecutionWorkspace, details_path, run_request
 from cycle_runner.issue_context import LinearIssueSource
 from cycle_runner.projects import WorkspaceResolver, load_projects
 from cycle_runner.work_requests import WorkRequestStore
@@ -76,15 +77,16 @@ def _git(clone, *args):
 
 def test_sb_640_on_a_fresh_mt_clone(mt_config, work_request_db):
     # SB-640's code items (rate limiting, a password policy) are already on MT's
-    # main (MT #612); what's left is production work. So the honest outcome is
-    # "no change made", reached by reading the whole issue and running MT's tests.
+    # main (MT #612); what's left is production work. Seen live: usually "no
+    # change made"; once the agent went on to edit local seed scripts and ran
+    # out of turns. So this checks the plumbing and the record, not the choice.
     origin = mt_config.projects["MT"].repository
     before = _checkout_state(origin)
     store = WorkRequestStore(work_request_db)  # a temporary database; never data/cycle-runner.db
     request = _request(store, ISSUE, "Weak admin password and rate limiting disabled")
 
     done, executed = run_request(
-        store, ClaudeCodeExecutor(max_turns=40, max_budget_usd=3.0), WorkspaceResolver(mt_config),
+        store, ClaudeCodeExecutor(max_turns=60, max_budget_usd=3.0), WorkspaceResolver(mt_config),
         request.work_request_id, LinearIssueSource.from_env(),
     )
 
@@ -93,11 +95,14 @@ def test_sb_640_on_a_fresh_mt_clone(mt_config, work_request_db):
     assert executed and done.started_at is not None  # setup and the Linear read succeeded; the agent ran
     assert f"[workspace: {clone}]" in done.result_message
     assert (clone / "backend" / ".venv" / "bin" / "python").resolve().is_relative_to(clone.resolve())
+    assert " raised " not in done.result_message  # finished or failed cleanly, never crashed
+    record = json.loads(details_path(ExecutionWorkspace(path=clone, test_command="")).read_text())
+    assert record["details"]["turns"] > 0 and (clone.parent / f"{clone.name}.claude").is_dir()
     changed = [line for line in _git(clone, "status", "--porcelain").splitlines() if not line.startswith("??")]
-    if done.status == "failed":
-        assert done.result_message.startswith("No change made."), done.result_message
+    if done.result_message.startswith("No change made."):
         assert changed == []
-    else:
+    if done.status == "completed":
+        assert record["details"]["tests_observed"] >= 1
         assert any(line.endswith(".py") for line in changed), changed
     assert _git(clone, "remote") == ""
     assert _checkout_state(origin) == before  # the real checkout was only read
