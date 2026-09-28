@@ -28,9 +28,9 @@ import logging
 import os
 import socket
 import sys
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cycle_runner.work_requests import InvalidTransition, WorkRequest, WorkRequestStore, open_store
 
@@ -39,7 +39,10 @@ log = logging.getLogger(__name__)
 
 class ExecutionResult(BaseModel):
     outcome: Literal["completed", "failed"]
-    message: str
+    message: str  # human-readable; this is what the store records
+    # Anything structured the executor wants to report (files changed, cost, ...).
+    # Returned to the caller, not persisted yet.
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class Executor(Protocol):
