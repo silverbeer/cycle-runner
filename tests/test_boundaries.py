@@ -112,7 +112,7 @@ def test_only_approval_and_the_executor_can_reach_the_work_request_store():
         if path.name != "work_requests.py"
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
-    assert sorted(users) == ["approval.py", "claude_executor.py", "executor.py", "fake_executor.py", "projects.py"]
+    assert sorted(users) == ["approval.py", "executor.py", "issue_context.py", "projects.py"]
 
 
 @pytest.mark.parametrize(
@@ -153,9 +153,9 @@ def test_execution_modules_cannot_reach_adk_telegram_linear_or_the_conversation(
     assert not [name for name in imports if name.startswith(forbidden)], (module, imports)
 
 
-def test_the_fake_executor_depends_only_on_the_executor_interface_and_the_work_request_model():
+def test_the_fake_executor_depends_only_on_the_executor_interface():
     imports = _imported_modules(PACKAGE / "fake_executor.py")
-    assert imports == {"cycle_runner.executor", "cycle_runner.work_requests"}
+    assert imports == {"cycle_runner.executor"}
 
 
 def test_only_the_executor_cli_knows_which_executor_exists():
@@ -167,7 +167,7 @@ def test_the_conversation_side_cannot_start_execution():
     users = [path.name for path in _modules() if "cycle_runner.executor" in _imported_modules(path)]
     # The executors implement the interface and the resolver produces its
     # workspaces; nothing in the Telegram/ADK path imports it.
-    assert sorted(users) == ["claude_executor.py", "fake_executor.py", "projects.py"]
+    assert sorted(users) == ["claude_executor.py", "fake_executor.py", "issue_context.py", "projects.py"]
 
 
 def test_importing_the_package_does_not_load_adk():
@@ -195,9 +195,44 @@ def test_the_claude_executor_never_touches_lifecycle_state_or_starts_processes()
         assert forbidden not in source, forbidden
 
 
-def test_the_runner_does_not_know_about_claude():
-    imports = _imported_modules(PACKAGE / "executor.py")
-    assert not [n for n in imports if n.startswith(("claude_agent_sdk", "cycle_runner.claude_executor"))]
+def _runner_library_imports() -> set[str]:
+    """What the runner itself imports; the command line below it picks the implementations."""
+    source = (PACKAGE / "executor.py").read_text()
+    library, _, _ = source.partition("# --- command line")
+    return _imported_modules_in(library)
+
+
+def _imported_modules_in(source: str) -> set[str]:
+    names = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+    return names
+
+
+def test_the_runner_does_not_know_about_claude_or_linear():
+    imports = _runner_library_imports()
+    forbidden = ("claude_agent_sdk", "cycle_runner.claude_executor", "cycle_runner.issue_context",
+                 "cycle_runner.linear_client")
+    assert not [n for n in imports if n.startswith(forbidden)], imports
+
+
+def test_executors_get_the_task_not_linear():
+    for module in ("claude_executor.py", "fake_executor.py"):
+        imports = _imported_modules(PACKAGE / module)
+        assert not [n for n in imports if n.startswith(
+            ("cycle_runner.issue_context", "cycle_runner.linear_client", "cycle_runner.work_requests", "httpx")
+        )], (module, imports)
+
+
+def test_the_issue_context_only_reads():
+    imports = _imported_modules(PACKAGE / "issue_context.py")
+    assert imports == {"asyncio", "cycle_runner.executor", "cycle_runner.linear_client", "cycle_runner.work_requests"}
+    source = (PACKAGE / "issue_context.py").read_text()
+    for forbidden in ("mutation", "open_store", "WorkRequestStore", ".claim(", ".finish("):
+        assert forbidden not in source, forbidden
 
 
 # --- V1.1: projects live in configuration, not code ---------------------------

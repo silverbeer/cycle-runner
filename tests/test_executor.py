@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pytest
 
 from cycle_runner import executor as executor_module
-from cycle_runner.executor import ExecutionResult, run_next, run_request
+from cycle_runner.executor import ExecutionResult, ExecutionTask, run_next, run_request, task_from_approval
 from cycle_runner.fake_executor import FakeExecutor
 from cycle_runner.work_requests import InvalidTransition, WorkRequestStore
 
@@ -49,8 +49,8 @@ class Spy:
         self.received, self.workspaces = [], []
         self.outcome, self.error = outcome, error
 
-    def execute(self, request, workspace):
-        self.received.append(request)
+    def execute(self, task, workspace):
+        self.received.append(task)
         self.workspaces.append(workspace)
         if self.error:
             raise self.error
@@ -66,21 +66,32 @@ def test_a_pending_request_runs_to_completed(store, resolver):
     done = run_next(store, FakeExecutor(), resolver)
 
     assert (done.work_request_id, done.status) == (wr, "completed")
-    assert done.result_message == f"Fake execution completed for {wr} (SB-640). No real work was done."
+    assert done.result_message == (
+        f"Fake execution completed for {wr} (SB-640). No real work was done. [workspace: {resolver.workspace.path}]"
+    )
     assert done.claimed_by.startswith("fake@")
     assert done.claimed_at <= done.started_at <= done.finished_at
     assert store.get(wr) == done  # durable
 
 
-def test_the_executor_receives_the_claimed_running_request(store, resolver):
+def test_the_executor_receives_the_task_while_the_request_is_running(store, resolver):
     wr = _approve(store)
-    spy = Spy()
+    statuses = []
 
+    class Watching(Spy):
+        def execute(self, task, workspace):
+            statuses.append(store.get(task.work_request_id))
+            return super().execute(task, workspace)
+
+    spy = Watching()
     run_next(store, spy, resolver)
 
     (received,) = spy.received
-    assert (received.work_request_id, received.issue_id, received.status) == (wr, "SB-640", "running")
-    assert received.claimed_by.startswith("spy@")
+    assert received == ExecutionTask(
+        work_request_id=wr, issue_id="SB-640", project_id="DEMO", title="t", description="", rationale="r"
+    )
+    (during,) = statuses
+    assert during.status == "running" and during.claimed_by.startswith("spy@")
 
 
 def test_no_pending_requests_is_handled_cleanly(store, resolver):
@@ -128,7 +139,7 @@ def test_an_executor_that_raises_is_recorded_as_failed(store, resolver):
     failed = run_next(store, Spy(error=RuntimeError("tests exploded")), resolver)
 
     assert failed.status == "failed"
-    assert failed.result_message == "spy raised RuntimeError: tests exploded"
+    assert failed.result_message.startswith("spy raised RuntimeError: tests exploded [workspace: ")
     assert run_next(store, Spy(), resolver) is None  # a failed request isn't retried
 
 
@@ -145,7 +156,7 @@ def test_the_fake_executor_is_deterministic(store, fixed_workspace):
     request = store.claim(wr, "x")
     workspace = fixed_workspace.workspace
 
-    assert FakeExecutor().execute(request, workspace) == FakeExecutor().execute(request, workspace)
+    assert FakeExecutor().execute(task_from_approval(request), workspace) == FakeExecutor().execute(task_from_approval(request), workspace)
 
 
 def test_the_fake_executor_performs_no_external_operations(store, monkeypatch, fixed_workspace):
@@ -161,7 +172,7 @@ def test_the_fake_executor_performs_no_external_operations(store, monkeypatch, f
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr("builtins.open", forbidden)
 
-    result = FakeExecutor().execute(request, workspace)
+    result = FakeExecutor().execute(task_from_approval(request), workspace)
 
     assert result.outcome == "completed"
 
@@ -216,7 +227,7 @@ def test_crash_while_running_strands_it_running_and_it_is_never_retried(store, w
                 return ExecutionWorkspace(path=__import__("pathlib").Path("."), test_command="true")
         class DiesMidWork:
             name = "dies"
-            def execute(self, request, workspace):
+            def execute(self, task, workspace):
                 os._exit(1)  # the process is killed while the work is in progress
         run_next(store, DiesMidWork(), Fixed())
     """

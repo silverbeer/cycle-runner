@@ -171,10 +171,10 @@ class Spy:
     def __init__(self):
         self.calls = []
 
-    def execute(self, request, workspace):
+    def execute(self, task, workspace):
         from cycle_runner.executor import ExecutionResult
 
-        self.calls.append((request.work_request_id, workspace))
+        self.calls.append((task.work_request_id, workspace))
         return ExecutionResult(outcome="completed", message="spy")
 
 

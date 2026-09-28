@@ -5,18 +5,17 @@ Linear, no GitHub, no model. It only proves that a work request can travel
 the whole lifecycle. The issue id is just an identifier here.
 """
 
-from cycle_runner.executor import ExecutionResult, ExecutionWorkspace
-from cycle_runner.work_requests import WorkRequest
+from cycle_runner.executor import ExecutionResult, ExecutionTask, ExecutionWorkspace
 
 
 class FakeExecutor:
     name = "fake"
 
-    def execute(self, request: WorkRequest, workspace: ExecutionWorkspace) -> ExecutionResult:
+    def execute(self, task: ExecutionTask, workspace: ExecutionWorkspace) -> ExecutionResult:
         return ExecutionResult(
             outcome="completed",
             message=(
-                f"Fake execution completed for {request.work_request_id} "
-                f"({request.issue_id}). No real work was done."
+                f"Fake execution completed for {task.work_request_id} "
+                f"({task.issue_id}). No real work was done."
             ),
         )
