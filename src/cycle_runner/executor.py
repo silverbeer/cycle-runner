@@ -4,13 +4,22 @@
     uv run python -m cycle_runner.executor list
     uv run python -m cycle_runner.executor release WR-000001
     uv run python -m cycle_runner.executor abandon WR-000001 --reason "..."
+    uv run python -m cycle_runner.executor backfill-project WR-000001 MT
+
+    # a real coding agent, on one named request (reads the issue from Linear):
+    op run --env-file .env -- uv run python -m cycle_runner.executor run \
+        --request WR-000001 --executor claude --max-turns 40 --max-budget-usd 3
 
 An Executor does the work for one request, inside a workspace it is given,
 and says how it went. It knows nothing about claiming, statuses, timestamps
 or projects. The runner owns the lifecycle and assembles the context: it
-claims a request, has a WorkspaceResolver turn it into an ExecutionWorkspace
-(projects.py), and only then calls the executor. Executors: FakeExecutor and
-ClaudeCodeExecutor.
+claims a request, has a TaskSource assemble the task (for the Claude
+executor, the full issue from Linear: issue_context.py) and a
+WorkspaceResolver turn it into an ExecutionWorkspace (projects.py: a fresh
+clone, set up), and only then calls the executor. If either fails, the
+request fails to start and the executor never runs. Executors: FakeExecutor
+and ClaudeCodeExecutor. The workspace is kept, and its path recorded in the
+result, for inspection.
 
 This module knows work requests and executors only: no ADK, Telegram, Linear
 or model. The database is the source of truth for execution state.
@@ -213,6 +222,13 @@ def main(argv: list[str] | None = None) -> int:
     abandon = commands.add_parser("abandon", help="mark a stranded running request failed")
     abandon.add_argument("work_request_id")
     abandon.add_argument("--reason", default="stranded while running")
+    backfill = commands.add_parser(
+        "backfill-project",
+        help="record the project of a pending request approved before projects were recorded "
+             "(checked against Linear when it runs)",
+    )
+    backfill.add_argument("work_request_id")
+    backfill.add_argument("project_id")
     args = parser.parse_args(argv)
 
     store = open_store()
@@ -228,6 +244,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "release":
             print(_describe(store.release(args.work_request_id)))
+            return 0
+        if args.command == "backfill-project":
+            request = store.backfill_project(args.work_request_id, args.project_id)
+            print(f"{_describe(request)} (project {request.project_id})")
             return 0
         print(_describe(store.abandon(args.work_request_id, args.reason)))
         return 0

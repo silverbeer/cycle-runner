@@ -301,6 +301,34 @@ class WorkRequestStore:
             work_request_id, "running", "failed", finished_at=_now(), result_message=f"Abandoned: {reason}"
         )
 
+    # --- one-off repair (V1.2) ---------------------------------------------------
+
+    def backfill_project(self, work_request_id: str, project_id: str) -> WorkRequest:
+        """Record the project of a request approved before V1.1 recorded projects.
+
+        Narrow on purpose: only a pending request with no project, so nothing
+        that ran or was recorded at approval can be rewritten. Setting the
+        project it already has is a no-op. The caller checks the value (the
+        issue's repo label in Linear); this only stores it.
+        """
+        row_id = _row_id(work_request_id)
+        with self._connect() as db:
+            row = db.execute(
+                "UPDATE work_requests SET project_id = ? "
+                "WHERE id = ? AND status = 'pending' AND project_id IS NULL RETURNING *",
+                (project_id, row_id),
+            ).fetchone()
+        if row is not None:
+            return _work_request(row)
+        current = self.get(work_request_id)
+        if current is None:
+            raise InvalidTransition(f"{work_request_id} does not exist")
+        if current.project_id == project_id:
+            return current
+        if current.project_id is not None:
+            raise InvalidTransition(f"{work_request_id} already has project {current.project_id}")
+        raise InvalidTransition(f"{work_request_id} is {current.status}; only a pending request's project can be set")
+
     def _transition(self, work_request_id: str, from_status: str, to_status: str, **fields) -> WorkRequest:
         """Compare-and-set: change status only if it is still from_status."""
         assert (from_status, to_status) in TRANSITIONS, (from_status, to_status)

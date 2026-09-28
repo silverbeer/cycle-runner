@@ -329,3 +329,26 @@ def test_cli_refuses_invalid_recovery(store, capsys):
     wr = _approve(store)
     assert _cli("abandon", wr) == 2  # pending, not running
     assert f"error: {wr} is pending, not running" in capsys.readouterr().err
+
+
+def test_cli_claude_needs_a_named_request(store, capsys, projects_config):
+    wr = _approve(store)
+    assert _cli("run", "--executor", "claude") == 2
+    assert "--executor claude needs --request" in capsys.readouterr().err
+    assert store.get(wr).status == "pending"  # nothing claimed
+
+
+def test_cli_claude_without_linear_credentials_claims_nothing(store, capsys, projects_config):
+    # conftest removes the Linear credentials for unmarked tests.
+    wr = _approve(store)
+    assert _cli("run", "--request", wr, "--executor", "claude") == 2
+    assert "LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET must be set" in capsys.readouterr().err
+    assert store.get(wr).status == "pending"
+
+
+def test_cli_backfills_a_missing_project_only(store, capsys):
+    wr = _approve(store, project_id=None)
+    assert _cli("backfill-project", wr, "MT") == 0
+    assert f"{wr} SB-640 pending (project MT)" in capsys.readouterr().out
+    assert _cli("backfill-project", wr, "TRD") == 2
+    assert f"error: {wr} already has project MT" in capsys.readouterr().err
