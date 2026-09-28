@@ -80,6 +80,8 @@ uv run pytest -m ollama                # live round-trips through the local mode
 op run --env-file .env -- uv run pytest -m telegram   # real Telegram API
 op run --env-file .env -- uv run pytest -m linear     # real Linear API, read-only
 CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) uv run pytest -m claude   # real coding agent
+CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) \
+    op run --env-file .env -- uv run pytest tests/test_mt_live.py -s   # agent on a MissingTable clone (V1.2)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the offline set on every PR and every push
@@ -1259,4 +1261,203 @@ says SB-640 is `MT`, but nothing sets that automatically.
   readable paths such as uv caches.
 - **Cleaning up old workspaces.**
 - **What to do with pre-V1.1 requests** that have no project.
+
+## V1.2
+
+Real project execution: an approved MissingTable (MT) work request runs end
+to end. Cycle Runner reads the whole Linear issue, clones MT fresh and
+installs its dependencies. A Claude agent then works in the clone inside the
+sandbox, and MT's own unit tests run there too. Nothing is pushed, committed
+or written to Linear, and the MT checkout is never changed.
+
+```
+WR-000001 ──claim──► TaskSource (issue_context.py) ──► Linear, read-only: SB-640's full description
+             │        WorkspaceResolver (projects.py) ─► git clone --branch main ─► setup: uv sync
+             │                                                   (outside the sandbox, with network)
+             ▼
+          ExecutionTask + ExecutionWorkspace ──► ClaudeCodeExecutor (sandboxed, no network)
+                                                     └─ MT unit tests, observed in the SDK stream
+             ▼
+          completed / failed  +  WR-000001.json and WR-000001.claude/ beside the workspace
+```
+
+If the Linear read, the clone or the setup fails, the request goes from
+`claimed` to `failed` ("Not started: …") and Claude is never invoked.
+
+### Run it
+
+```bash
+CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) \
+  op run --env-file .env -- uv run python -m cycle_runner.executor run \
+    --request WR-000001 --executor claude --max-turns 40 --max-budget-usd 3
+```
+
+`--executor claude` only runs a request named with `--request`, and checks
+the Linear credentials before it claims anything.
+
+### Task context: the runner reads Linear, the executor doesn't
+
+`LinearIssueSource` (issue_context.py) uses the existing read-only
+`LinearClient` to fetch the identifier, title, description and labels. It
+builds a task only when:
+- the identifier matches;
+- the issue's `repo` label equals the project recorded at approval;
+- the description isn't empty.
+
+Descriptions are capped at 20k characters. Executors receive an
+`ExecutionTask` (issue, project, title, description, rationale) instead of
+the `WorkRequest`, and they import neither Linear nor the store (checked by
+`test_boundaries.py`).
+
+The description is untrusted text. The prompt fences it as `<issue>` source
+material and asks the agent to list anything that isn't a code change (for
+example rotating a production password) as left for a human. Security
+doesn't depend on that wording: what the agent can do is fixed by the
+sandbox, the tool policy and the credential stripping from V1.0.
+
+### Setup: outside the sandbox, so restricted
+
+```toml
+[projects.MT]
+branch = "main"                  # the checkout itself is on a feature branch
+setup_command = "env UV_PYTHON_INSTALL_DIR=.python UV_PYTHON_PREFERENCE=only-managed uv sync --directory backend --frozen"
+setup_produces = ["backend/.venv/bin/python"]
+test_command = "/usr/bin/env -C backend PATH=/usr/bin:/bin .venv/bin/python -m pytest tests/unit -o addopts= -o log_cli=false -n auto -q --capture=no"
+test_success_pattern = '^\d+ passed(, \d+ (skipped|deselected|xfailed|xpassed|warnings?))* in [\d.]+s'
+```
+
+Installing needs network and caches, and the agent gets neither, so setup
+runs before the agent and outside its sandbox. That makes it privileged, so
+it's constrained:
+- **One install step:** `uv sync`, `npm ci`, `pnpm install`, `yarn install`,
+  `poetry install` or `bundle install`, optionally behind `env NAME=value`.
+  `uv run` and anything else is refused when the config loads.
+- **No shell:** no operators or quoting; it's split with `shlex` and run with
+  `shell=False`.
+- **Paths stay in the clone:** no absolute paths, no `..`, no `~`. The
+  working directory is the clone.
+- **No credentials:** the environment has every credential-looking variable
+  removed.
+- **A 10-minute timeout.**
+- **Verified:** every `setup_produces` path must exist and resolve inside the
+  clone.
+
+Dependencies stay inside the workspace. `UV_PYTHON_INSTALL_DIR=.python` puts
+the interpreter in the clone. uv's default links the venv to a Python under
+`~`, which the sandbox can't read, and `setup_produces` catches exactly that.
+The sandbox can already read the workspace, so no `readable` paths under `~`
+are needed. The setup takes about 5 s with a warm uv cache.
+
+Why the test command looks like that (each part was found by running MT's
+tests in the sandbox):
+- `env -C backend`: MT's `conftest.py` loads `../.env.test`.
+- `--capture=no`: pytest's capture dies in the sandbox (exit 120).
+- `PATH=/usr/bin:/bin`: one MT test shells out to 1Password `op`, which the
+  sandbox can't run.
+- `-o addopts=`: drops the verbose and coverage options.
+
+Result: 1,324 passed and 12 skipped in the sandbox, the same as outside it
+apart from the skips.
+
+### Not trusting the agent's word
+
+The executor watches the SDK stream (tool calls and the output Claude Code
+captured), not just the agent's report. It records `completed` only if all of
+these hold:
+- the run ended cleanly and the report says the tests passed;
+- the report names the command that actually ran (the live WR-000001 run
+  produced a placeholder report, `summary: "test"`);
+- the exact test command ran after the last edit, and its output matches
+  `test_success_pattern`;
+- the agent changed files. A change counts only if it touches a file that
+  existed before or one the agent wrote. Test byproducts such as logs and
+  pytest's temp directories don't count; they once made a no-op run look
+  like a change.
+
+The sandbox makes every command report exit code 1, even on success, so the
+exit code is ignored. Why: V1.2 denies writes to Claude Code's shared temp
+area, and its shell wrapper can't write its cwd file there. The output
+pattern decides instead.
+
+When the agent changes nothing, the result is `failed` with "No change
+made." and its summary. That may be correct (the work may already be done),
+but nothing was delivered, so a human decides.
+
+### Workspaces: kept, and nothing hidden
+
+The runner leaves three things under `workspace_root`:
+- `WR-000001/`: the clone, with its origin remote removed;
+- `WR-000001.json`: the result, turns, cost, test runs observed and the tail
+  of the last test output;
+- `WR-000001.claude/`: the agent's Claude Code state, including its session
+  transcript. Without this, Claude Code wrote every agent transcript to
+  `~/.claude/projects/<workspace path>`. The login token isn't written there
+  (checked).
+
+The store's result message ends with `[workspace: …]`. Nothing is deleted
+automatically.
+
+### Sandbox changes (found while doing this)
+
+- **Claude Code's shared temp area was writable.** `/tmp/claude-<uid>`,
+  which holds every Claude Code session's scratch files, could be written by
+  sandboxed code. It's now `denyWrite`, and each run gets its own scratch
+  directory. A `workspace_root` inside that area is refused.
+- **`.git` in the clone is read-only to sandboxed code.** The runner later
+  runs git there, outside the sandbox, and `.git/config` can name programs.
+- **Background Bash is refused.** Its output landed outside the workspace,
+  where the agent couldn't read it.
+- **Parent-session variables are hidden.** When the executor is started from
+  inside a Claude Code session, that session's variables
+  (`CLAUDE_CODE_SESSION_ID`, `CLAUDE_TMPDIR`, …) are removed for the run.
+  `SHELL` is pinned to bash.
+
+The live isolation test (`-m claude`) checks the temp area and `.git` too.
+
+### WR-000001
+
+It was approved in V0.8, before projects were recorded. Its `project_id` was
+set to `MT` by hand, on request, with a database backup taken first.
+`backfill-project` now covers this case narrowly:
+
+```bash
+uv run python -m cycle_runner.executor backfill-project WR-000001 MT
+```
+
+It changes only a pending request that has no project, never overwrites one,
+and is a no-op if the value is already set. The run cross-checks the project
+against the issue's `repo` label in Linear. There's no second approval and
+no Linear change.
+
+The deliberate run (2026-09-28) ended `failed`: "No change made."
+- SB-640's code items (rate limiting and a password policy) were already on
+  MT `main` (MT #612).
+- The agent ran MT's unit tests (1,324 passed, 12 skipped) and changed
+  nothing.
+- Its report was the placeholder described above; the check for that was
+  added after this run.
+- The MT checkout was unchanged: its refs, status and stash hashed the same
+  before and after.
+
+### Tests
+
+- **Offline** (in CI): setup validation and execution with a stand-in `uv`,
+  branch cloning, issue context, the backfill, observed-test verification,
+  change attribution, report consistency, and the boundaries.
+- **`tests/test_mt_live.py`** (markers `claude` and `linear`, with a
+  temporary database and workspace root):
+  - SB-640 on a fresh MT clone;
+  - a small real change to MT whose unit tests must pass in the sandbox.
+
+  About $0.40 per agent run.
+
+### Not in V1.2
+
+- Branches, commits, push, PRs and Linear writes. The work stays in the clone.
+- Cleaning up old workspaces.
+- An outcome for "already done", distinct from `failed`.
+- An independent re-run of the tests by the runner. Re-running them outside
+  the sandbox would execute agent-written code unconfined, so the evidence is
+  the observed in-sandbox run.
+- Setup for the other projects (MTA, TRD, JT).
 
