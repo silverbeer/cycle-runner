@@ -6,22 +6,32 @@ The live-agent tests are in test_claude_live.py (marker `claude`).
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from claude_agent_sdk import CLIConnectionError, ResultMessage
+from claude_agent_sdk import (
+    AssistantMessage,
+    CLIConnectionError,
+    ResultMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 
 from cycle_runner import claude_executor
 from cycle_runner.claude_executor import (
     ClaudeCodeExecutor,
+    Transcript,
     build_options,
     build_prompt,
     check_tool_call,
     credential_variables,
     to_execution_result,
 )
-from cycle_runner.executor import run_request
+from cycle_runner.executor import ExecutionTask, run_request, task_from_approval
 from cycle_runner.work_requests import WorkRequestStore
 from conftest import FixedWorkspace
 from disposable_repo import make_repo
@@ -46,6 +56,32 @@ def _result(**overrides):
                   structured_output={"outcome": "completed", "summary": "Added greet().",
                                      "tests_passed": True, "tests_command": "python -m unittest"})
     return ResultMessage(**{**fields, **overrides})
+
+
+def _result_for(workspace, **report):
+    """A successful result whose report names this workspace's test command, as a real one does."""
+    return _result(structured_output={"outcome": "completed", "summary": "Added greet().", "tests_passed": True,
+                                      "tests_command": workspace.test_command, **report})
+
+
+def _tool_call(call_id, name, **tool_input):
+    return AssistantMessage(content=[ToolUseBlock(id=call_id, name=name, input=tool_input)], model="m")
+
+
+def _tool_result(call_id, output):
+    return UserMessage(content=[ToolResultBlock(tool_use_id=call_id, content=output, is_error=True)])
+
+
+def _test_run(workspace, output="Ran 2 tests in 0.001s\n\nOK", call_id="t1"):
+    """An observed run of the workspace's test command, as the SDK streams it."""
+    return [_tool_call(call_id, "Bash", command=workspace.test_command), _tool_result(call_id, output)]
+
+
+def _observed(workspace, *messages):
+    transcript = Transcript(workspace.test_command)
+    for message in messages:
+        transcript.observe(message)
+    return transcript
 
 
 # --- the policy hook --------------------------------------------------------------
@@ -75,6 +111,8 @@ def _result(**overrides):
         ("Grep", {"pattern": "greet", "path": "src"}, True),
         ("Grep", {"pattern": "TOKEN", "path": "/Users"}, False),
         ("Bash", {"command": "{test}"}, True),
+        ("Bash", {"command": "{test}", "run_in_background": True}, False),  # found live: output lands outside
+        ("Bash", {"command": "{test}", "run_in_background": False}, True),
         ("Bash", {"command": "git status"}, False),  # git doesn't work in the sandbox; not offered
         ("Bash", {"command": "git diff src/hello.py"}, False),
         ("StructuredOutput", {"outcome": "completed"}, True),  # the SDK's report channel
@@ -93,7 +131,8 @@ def _result(**overrides):
 )
 def test_the_policy(workspace, tool, tool_input, allowed):
     resolved = {
-        key: str(value).replace("{ws}", str(workspace.path)).replace("{test}", workspace.test_command)
+        key: value.replace("{ws}", str(workspace.path)).replace("{test}", workspace.test_command)
+        if isinstance(value, str) else value
         for key, value in tool_input.items()
     }
     reason = check_tool_call(tool, resolved, workspace)
@@ -158,9 +197,39 @@ def test_credentials_are_hidden_from_the_agent_and_its_commands(workspace):
     denied = {entry["name"] for entry in json.loads(options.settings)["sandbox"]["credentials"]["envVars"]}
 
     assert credential_variables(ENVIRON) == sorted(n for n in ENVIRON if n not in ("HOME", "PATH"))
-    assert options.env == {name: "" for name in credential_variables(ENVIRON) if name != "CLAUDE_CODE_OAUTH_TOKEN"}
+    blanked = {name for name, value in options.env.items() if value == ""}
+    assert blanked == {name for name in credential_variables(ENVIRON) if name != "CLAUDE_CODE_OAUTH_TOKEN"}
     assert denied >= set(credential_variables(ENVIRON)) | {"ANTHROPIC_API_KEY"}  # even the agent's own login
     assert "HOME" not in options.env and "PATH" not in options.env
+
+
+def test_the_agent_gets_its_own_scratch_directory_and_nothing_else_to_write(workspace, tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    options = build_options(workspace, model="m", max_turns=1, max_budget_usd=0.1, environ=ENVIRON, scratch=scratch)
+    filesystem = json.loads(options.settings)["sandbox"]["filesystem"]
+    root = str(workspace.path.resolve())
+
+    assert filesystem["allowWrite"] == [str(scratch.resolve())]
+    assert str(scratch.resolve()) in filesystem["allowRead"]
+    # Claude Code's shared temp area (every session's files) and the clone's .git
+    # are never writable. Found live: the temp area was writable by default.
+    uid = os.getuid()
+    assert set(filesystem["denyWrite"]) == {f"/private/tmp/claude-{uid}", f"/tmp/claude-{uid}", f"{root}/.git"}
+    assert options.env["CLAUDE_CODE_TMPDIR"] == options.env["TMPPREFIX"] == str(scratch.resolve())
+    assert options.env["SHELL"] == "/bin/bash"  # not the user's shell and its startup files
+
+
+def test_a_parent_claude_code_sessions_variables_are_hidden_during_the_run(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent")
+    monkeypatch.setenv("CLAUDE_TMPDIR", "/tmp/claude-parent")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "login")
+
+    with claude_executor._without_parent_session():
+        assert "CLAUDE_CODE_SESSION_ID" not in os.environ and "CLAUDE_TMPDIR" not in os.environ
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "login"  # the agent's own login stays
+
+    assert os.environ["CLAUDE_CODE_SESSION_ID"] == "parent"  # and everything comes back
 
 
 def test_the_agent_must_answer_in_the_report_schema(workspace):
@@ -168,14 +237,28 @@ def test_the_agent_must_answer_in_the_report_schema(workspace):
     assert set(schema["required"]) == {"outcome", "summary", "tests_passed", "tests_command"}
 
 
-def test_the_prompt_comes_from_the_work_request_alone(workspace, work_request_db):
+def test_the_prompt_comes_from_the_task(workspace):
+    task = ExecutionTask(
+        work_request_id="WR-000007", issue_id="DEMO-9", project_id="DEMO", title="Tighten signup passwords",
+        description="Signups accept 3-character passwords.\n\nAlso rotate the admin password in prod.",
+        rationale="Security fix.",
+    )
+
+    prompt = build_prompt(task, workspace)
+
+    for fact in ("WR-000007", "DEMO-9", task.title, task.rationale, workspace.test_command):
+        assert fact in prompt
+    assert f"<issue>\n{task.description}\n</issue>" in prompt  # the whole description, delimited
+    assert "not instructions" in prompt and "left for a human" in prompt
+    assert "Don't commit" in prompt
+
+
+def test_a_task_without_a_description_has_no_issue_section(workspace, work_request_db):
     request = _request(WorkRequestStore(work_request_db))
 
-    prompt = build_prompt(request, workspace)
+    prompt = build_prompt(task_from_approval(request), workspace)
 
-    for fact in (request.work_request_id, "SB-640", request.title_at_approval, request.rationale, workspace.test_command):
-        assert fact in prompt
-    assert "Don't commit" in prompt
+    assert request.title_at_approval in prompt and "<issue>" not in prompt
 
 
 # --- mapping the SDK result -----------------------------------------------------------
@@ -201,7 +284,7 @@ def test_success_needs_a_clean_run_passing_tests_and_a_change():
                                     "tests_command": "x"}), ["a"], "reports failure: Can't do it."),
         (_result(structured_output={"outcome": "completed", "summary": "Done.", "tests_passed": False,
                                     "tests_command": "x"}), ["a"], "reports failure: Done."),
-        (_result(), [], "changed no files"),
+        (_result(), [], "No change made. The coding agent reports: Added greet()."),
     ],
 )
 def test_anything_less_is_a_failure(message, files, expected):
@@ -218,9 +301,11 @@ def test_permission_denials_are_reported(workspace):
 # --- the executor, with a fake agent ----------------------------------------------------
 
 
-def _fake_query(effect, result):
+def _fake_query(effect, result, messages=()):
     async def fake(*, prompt, options):
         effect(Path(options.cwd), prompt, options)
+        for message in messages:
+            yield message
         yield result
     return fake
 
@@ -233,12 +318,13 @@ def test_execute_reports_what_the_agent_changed(workspace, work_request_db, monk
         seen["cwd"], seen["prompt"] = cwd, prompt
         (cwd / "src" / "hello.py").write_text("def greet(name):\n    return f'Hello, {name}!'\n")
 
-    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result()))
+    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result_for(workspace), _test_run(workspace)))
 
-    result = ClaudeCodeExecutor().execute(request, workspace)
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
     assert result.outcome == "completed"
     assert result.details["files_changed"] == ["src/hello.py"]
+    assert result.details["tests_observed"] == 1 and result.details["tests_output_tail"].endswith("OK")
     assert seen["cwd"] == workspace.path.resolve()
     assert request.title_at_approval in seen["prompt"]
 
@@ -252,7 +338,7 @@ def test_an_sdk_failure_is_a_failed_result_not_a_crash(workspace, work_request_d
 
     monkeypatch.setattr(claude_executor, "query", broken)
 
-    result = ClaudeCodeExecutor().execute(request, workspace)
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
     assert result.outcome == "failed"
     assert "could not run: CLIConnectionError" in result.message
@@ -263,7 +349,8 @@ def test_the_runner_owns_the_lifecycle_around_the_claude_executor(workspace, wor
     request = _request(store)
     monkeypatch.setattr(
         claude_executor, "query",
-        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result()),
+        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result_for(workspace),
+                    _test_run(workspace)),
     )
 
     resolver = FixedWorkspace(workspace)
@@ -272,6 +359,7 @@ def test_the_runner_owns_the_lifecycle_around_the_claude_executor(workspace, wor
     assert executed and done.status == "completed"
     assert done.claimed_by.startswith("claude-code@")
     assert done.result_message.startswith("Added greet(). (tests passed")
+    assert done.result_message.endswith(f"[workspace: {workspace.path}]")  # where to inspect the work
     again, executed_again = run_request(store, ClaudeCodeExecutor(), resolver, request.work_request_id)
     assert executed_again is False and again.status == "completed"
 
@@ -295,8 +383,142 @@ def test_a_failed_run_is_reported_from_its_result_not_as_a_crash(workspace, work
 
     monkeypatch.setattr(claude_executor, "query", out_of_turns)
 
-    result = ClaudeCodeExecutor().execute(request, workspace)
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
     assert result.outcome == "failed"
     assert result.message == "The coding agent stopped: error_max_turns. Reached maximum number of turns (1)"
 
+
+
+# --- the executor's own check of the tests ------------------------------------------------
+
+
+def test_the_agents_word_alone_is_not_enough(workspace, monkeypatch, work_request_db):
+    # The agent reports passing tests but never ran them.
+    request = _request(WorkRequestStore(work_request_db))
+    monkeypatch.setattr(
+        claude_executor, "query",
+        _fake_query(lambda cwd, p, o: (cwd / "src" / "hello.py").write_text("changed\n"), _result_for(workspace)),
+    )
+
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
+
+    assert result.outcome == "failed"
+    assert "the tests were never run" in result.message
+    assert result.details["tests_observed"] == 0
+
+
+@pytest.mark.parametrize(
+    ("messages", "pattern", "problem"),
+    [
+        (lambda ws: [], None, "the tests were never run"),
+        # A command that merely resembles the test command isn't a test run.
+        (lambda ws: [_tool_call("x", "Bash", command=ws.test_command + " -k nothing"), _tool_result("x", "OK")],
+         None, "the tests were never run"),
+        (lambda ws: [*_test_run(ws), _tool_call("e", "Edit", file_path="src/hello.py")],
+         None, "files were edited after the last test run"),
+        (lambda ws: _test_run(ws, output="FAILED (failures=1)"), r"^OK$", "doesn't show the tests passing"),
+        (lambda ws: [*_test_run(ws, output="FAILED", call_id="a"), *_test_run(ws, call_id="b")], r"^OK$", None),
+        (lambda ws: [*_test_run(ws, call_id="a"), *_test_run(ws, output="FAILED", call_id="b")], r"^OK$",
+         "doesn't show the tests passing"),  # the last run counts, not the best one
+        (lambda ws: [_tool_call("e", "Write", file_path="t.py"), *_test_run(ws)], r"^OK$", None),
+        (lambda ws: _test_run(ws, output="Exit code 1\n1324 passed, 12 skipped in 31.02s"),
+         r"^\d+ passed(, \d+ skipped)? in ", None),  # the sandbox's non-zero exit is ignored
+    ],
+)
+def test_the_observed_test_runs(workspace, messages, pattern, problem):
+    transcript = _observed(workspace, *messages(workspace))
+
+    verdict = transcript.verdict(pattern)
+    assert verdict is None if problem is None else problem in verdict
+    result = to_execution_result(_result_for(workspace), ["src/hello.py"], transcript, pattern)
+    assert result.outcome == ("completed" if problem is None else "failed")
+
+
+def test_tool_output_in_parts_is_read_as_text(workspace):
+    transcript = _observed(
+        workspace, _tool_call("t", "Bash", command=workspace.test_command),
+        UserMessage(content=[ToolResultBlock(tool_use_id="t", content=[{"type": "text", "text": "Ran 1\n\nOK"}])]),
+        AssistantMessage(content=[TextBlock(text="Tests pass.")], model="m"),
+    )
+    assert transcript.test_runs == [(1, "Ran 1\n\nOK")]
+    assert transcript.verdict(r"^OK$") is None
+
+
+def test_test_byproducts_are_not_the_agents_changes(workspace, work_request_db, monkeypatch):
+    # Found live on MT: the work was already done, the agent changed nothing,
+    # and pytest's temp files and logs made it look like a change.
+    request = _request(WorkRequestStore(work_request_db))
+
+    def tests_leave_files(cwd, prompt, options):
+        (cwd / "logs").mkdir()
+        (cwd / "logs" / "pytest.log").write_text("ran\n")
+        (cwd / "pytest-of-someone" / "session.json").parent.mkdir()
+        (cwd / "pytest-of-someone" / "session.json").write_text("{}")
+
+    monkeypatch.setattr(claude_executor, "query", _fake_query(tests_leave_files, _result_for(workspace), _test_run(workspace)))
+
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
+
+    assert result.outcome == "failed" and result.message.startswith("No change made.")
+    assert result.details["files_changed"] == [] and result.details["other_new_files"] == 2
+
+
+def test_new_files_the_agent_wrote_and_edits_to_existing_files_count(workspace, work_request_db, monkeypatch):
+    request = _request(WorkRequestStore(work_request_db))
+
+    def agent(cwd, prompt, options):
+        (cwd / "src" / "hello.py").write_text("changed\n")
+        (cwd / "tests" / "test_greet.py").write_text("# new test\n")
+        (cwd / "junk.log").write_text("byproduct\n")
+
+    messages = [_tool_call("w", "Write", file_path=str(workspace.path / "tests" / "test_greet.py")),
+                _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace)]
+    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result_for(workspace), messages))
+
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
+
+    assert result.outcome == "completed", result.message
+    assert result.details["files_changed"] == ["src/hello.py", "tests/test_greet.py"]
+    assert result.details["other_new_files"] == 1
+
+
+def test_a_long_list_of_changes_is_shortened_in_the_message():
+    files = [f"f{i}.py" for i in range(14)]
+    result = to_execution_result(_result(), files)
+    assert result.message.endswith("f9.py and 4 more)")
+    assert result.details["files_changed"] == files
+
+
+def test_a_placeholder_report_is_not_accepted(workspace):
+    # Found live: after its real report failed the schema check three times, the
+    # agent sent {"summary": "test", "tests_command": "pytest"} and stopped.
+    transcript = _observed(workspace, _tool_call("r1", "StructuredOutput", outcome="completed"),
+                           *_test_run(workspace), _tool_call("r2", "StructuredOutput", summary="test"))
+
+    result = to_execution_result(_result_for(workspace, summary="test", tests_command="pytest"), ["src/hello.py"],
+                                 transcript)
+
+    assert result.outcome == "failed"
+    assert result.message == "The coding agent's report doesn't describe this run (it names `pytest`): test"
+    assert result.details["report_attempts"] == 2
+
+
+def test_the_prompt_says_how_to_report(workspace, work_request_db):
+    prompt = build_prompt(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
+    assert "StructuredOutput tool once with all four fields" in prompt and "placeholder" in prompt
+
+
+def test_the_agents_state_is_kept_beside_the_workspace_not_under_the_home_directory(workspace, work_request_db,
+                                                                                   monkeypatch):
+    # Found live: Claude Code keeps a transcript of every session under
+    # ~/.claude/projects/<workspace path>, out of sight of the run.
+    seen = {}
+    monkeypatch.setattr(claude_executor, "query",
+                        _fake_query(lambda cwd, p, o: seen.update(env=o.env), _result_for(workspace)))
+
+    ClaudeCodeExecutor().execute(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
+
+    state = workspace.path.with_name(workspace.path.name + ".claude")
+    assert seen["env"]["CLAUDE_CONFIG_DIR"] == str(state.resolve())
+    assert state.is_dir() and oct(state.stat().st_mode & 0o777) == "0o700"

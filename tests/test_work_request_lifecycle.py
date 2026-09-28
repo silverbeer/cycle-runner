@@ -346,3 +346,58 @@ def test_a_v09_database_is_migrated_to_v11(tmp_path):
         assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
     store.claim("WR-000001", "x")
     assert store.fail_to_start("WR-000001", "no project").status == "failed"  # the new trigger rule applies
+
+
+# --- V1.2: backfilling the project of a request approved before V1.1 --------------
+
+
+def _legacy_request(tmp_path):
+    """A V0.9 database with one pending request, as WR-000001 was: no project."""
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as db:
+        db.executescript(V09_SCHEMA + V09_TRIGGER + "PRAGMA user_version = 2;")
+        db.execute(
+            "INSERT INTO work_requests (recommendation_id, issue_id, status, approved_by, approved_at, cycle_number,"
+            " title_at_approval, rationale) VALUES ('rec-1', 'SB-640', 'pending', 'telegram:1',"
+            " '2026-09-27T22:54:39+00:00', 10, 'Prod admin password', 'Urgent')"
+        )
+    return WorkRequestStore(path)
+
+
+def test_a_legacy_request_gets_its_project_and_nothing_else_changes(tmp_path):
+    store = _legacy_request(tmp_path)
+    (before,) = store.list_all()
+
+    after = store.backfill_project("WR-000001", "MT")
+
+    assert after.project_id == "MT" and store.get("WR-000001") == after
+    assert after.model_dump(exclude={"project_id"}) == before.model_dump(exclude={"project_id"})
+    assert after.status == "pending"  # still needs a deliberate run; no second approval
+
+
+def test_backfilling_the_same_project_again_is_a_no_op(tmp_path):
+    store = _legacy_request(tmp_path)
+    first = store.backfill_project("WR-000001", "MT")
+    assert store.backfill_project("WR-000001", "MT") == first
+
+
+def test_a_recorded_project_is_never_overwritten(tmp_path):
+    store = _legacy_request(tmp_path)
+    store.backfill_project("WR-000001", "MT")
+    with pytest.raises(InvalidTransition, match="already has project MT"):
+        store.backfill_project("WR-000001", "TRD")
+    assert store.get("WR-000001").project_id == "MT"
+
+
+@pytest.mark.parametrize("reach", ["claimed", "running", "completed"])
+def test_only_a_pending_requests_project_can_be_backfilled(store, reach):
+    wr = _approve(store)
+    _advance(store, wr, reach)
+    with pytest.raises(InvalidTransition, match=f"is {reach}; only a pending"):
+        store.backfill_project(wr, "MT")
+    assert store.get(wr).project_id is None
+
+
+def test_backfilling_an_unknown_request_fails(store):
+    with pytest.raises(InvalidTransition, match="WR-000042 does not exist"):
+        store.backfill_project("WR-000042", "MT")
