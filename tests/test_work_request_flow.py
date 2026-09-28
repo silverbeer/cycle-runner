@@ -90,7 +90,7 @@ def test_saying_yes_twice_creates_one_work_request(chat):
     assert len(_requests()) == 1
     for reply in (second, third):
         assert reply == (
-            "Already approved: TEST-2 is work request WR-000001, still pending. "
+            "Already approved: TEST-2 is work request WR-000001. "
             "No new work request was created."
         )
 
