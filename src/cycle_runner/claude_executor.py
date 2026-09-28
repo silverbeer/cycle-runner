@@ -6,9 +6,10 @@
                               structured report ─► ExecutionResult
 
 Like every Executor, it only executes: the runner in executor.py claims the
-request and records the outcome. It knows nothing about ADK, Telegram,
-Linear or the conversation, and nothing about which project it's working on:
-the workspace (a directory and how to run its tests) is given to it.
+request, resolves its project's workspace (projects.py) and records the
+outcome. It knows nothing about ADK, Telegram, Linear or the conversation,
+and nothing about projects: the ExecutionWorkspace (a directory and how to
+run its tests) is handed to execute().
 
 Confinement, from outermost to innermost. None of it relies on the prompt:
 
@@ -46,14 +47,13 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, HookMatcher, ResultError, ResultMessage, query
 from pydantic import BaseModel, ValidationError
 
-from cycle_runner.executor import ExecutionResult
+from cycle_runner.executor import ExecutionResult, ExecutionWorkspace
 from cycle_runner.work_requests import WorkRequest
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -65,27 +65,12 @@ SHELL_METACHARACTERS = re.compile(r"[;&|<>`$\\\n]")
 # The SDK delivers output_format results through this tool; it carries the
 # report and touches nothing, so the hook must let it through.
 REPORT_TOOL = "StructuredOutput"
-# What sandboxed commands may read besides the workspace and Workspace.readable:
+# What sandboxed commands may read besides the workspace and ExecutionWorkspace.readable:
 # the system directories a process needs to start. Everything else, including
 # the home directory, other temp directories and other repos, is unreadable.
 SYSTEM_READABLE = ("/usr", "/bin", "/sbin", "/System", "/dev", "/private/etc", "/private/var/db/timezone")
 CREDENTIAL_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|AUTH", re.IGNORECASE)
 AGENT_LOGIN_VARIABLES = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}  # the CLI itself needs one
-
-
-@dataclass(frozen=True)
-class Workspace:
-    """Where to work and how to check the work. The seed of a future per-project config.
-
-    path: the repository the agent may read and change, and nothing else.
-    test_command: the exact command that runs its tests.
-    readable: extra directories sandboxed commands may read, such as the
-        interpreter that runs the tests.
-    """
-
-    path: Path
-    test_command: str
-    readable: tuple[Path, ...] = ()
 
 
 class AgentReport(BaseModel):
@@ -100,7 +85,7 @@ class AgentReport(BaseModel):
 # --- the task -------------------------------------------------------------------
 
 
-def build_prompt(request: WorkRequest, workspace: Workspace) -> str:
+def build_prompt(request: WorkRequest, workspace: ExecutionWorkspace) -> str:
     """The task, from the work request alone. The executor doesn't read Linear."""
     return (
         f"You are working on approved work request {request.work_request_id} "
@@ -120,7 +105,7 @@ def build_prompt(request: WorkRequest, workspace: Workspace) -> str:
 # --- the policy (the PreToolUse hook) -------------------------------------------
 
 
-def check_tool_call(tool_name: str, tool_input: dict[str, Any], workspace: Workspace) -> str | None:
+def check_tool_call(tool_name: str, tool_input: dict[str, Any], workspace: ExecutionWorkspace) -> str | None:
     """Why this tool call is refused, or None if it may proceed. Deterministic."""
     root = workspace.path.resolve()
     if tool_name == REPORT_TOOL:
@@ -161,7 +146,7 @@ def _inside(raw: Any, root: Path) -> Path | None:
     return path if path == root or root in path.parents else None
 
 
-def _policy_hook(workspace: Workspace):
+def _policy_hook(workspace: ExecutionWorkspace):
     async def pre_tool_use(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
         reason = check_tool_call(input_data.get("tool_name", ""), input_data.get("tool_input") or {}, workspace)
         if reason is None:
@@ -184,7 +169,7 @@ def credential_variables(environ: dict[str, str]) -> list[str]:
     return sorted(name for name in environ if CREDENTIAL_NAME.search(name))
 
 
-def build_options(workspace: Workspace, *, model: str, max_turns: int, max_budget_usd: float,
+def build_options(workspace: ExecutionWorkspace, *, model: str, max_turns: int, max_budget_usd: float,
                   environ: dict[str, str]) -> ClaudeAgentOptions:
     root = str(workspace.path.resolve())
     credentials = credential_variables(environ)
@@ -286,33 +271,31 @@ def _snapshot(root: Path) -> dict[str, str]:
 class ClaudeCodeExecutor:
     name = "claude-code"
 
-    def __init__(self, workspace: Workspace, *, model: str | None = None, max_turns: int = 30,
-                 max_budget_usd: float = 1.0):
-        self.workspace = workspace
+    def __init__(self, *, model: str | None = None, max_turns: int = 30, max_budget_usd: float = 1.0):
         self.model = model or os.environ.get("CYCLE_RUNNER_CODING_MODEL", DEFAULT_MODEL)
         self.max_turns = max_turns
         self.max_budget_usd = max_budget_usd
 
-    def execute(self, request: WorkRequest) -> ExecutionResult:
-        before = _snapshot(self.workspace.path)
+    def execute(self, request: WorkRequest, workspace: ExecutionWorkspace) -> ExecutionResult:
+        before = _snapshot(workspace.path)
         try:
-            message = asyncio.run(self._run_agent(request))
+            message = asyncio.run(self._run_agent(request, workspace))
         except ClaudeSDKError as exc:
             return ExecutionResult(
                 outcome="failed", message=f"The coding agent could not run: {type(exc).__name__}: {exc}"
             )
-        after = _snapshot(self.workspace.path)
+        after = _snapshot(workspace.path)
         changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
         return to_execution_result(message, changed)
 
-    async def _run_agent(self, request: WorkRequest) -> ResultMessage | None:
+    async def _run_agent(self, request: WorkRequest, workspace: ExecutionWorkspace) -> ResultMessage | None:
         options = build_options(
-            self.workspace, model=self.model, max_turns=self.max_turns,
+            workspace, model=self.model, max_turns=self.max_turns,
             max_budget_usd=self.max_budget_usd, environ=dict(os.environ),
         )
         result = None
         try:
-            async for message in query(prompt=build_prompt(request, self.workspace), options=options):
+            async for message in query(prompt=build_prompt(request, workspace), options=options):
                 if isinstance(message, ResultMessage):
                     result = message
         except ResultError:

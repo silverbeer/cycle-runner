@@ -5,10 +5,12 @@
     uv run python -m cycle_runner.executor release WR-000001
     uv run python -m cycle_runner.executor abandon WR-000001 --reason "..."
 
-An Executor does the work for one request and says how it went. It knows
-nothing about claiming, statuses or timestamps; the runner and the store own
-those. V0.9 has only FakeExecutor. A real coding agent will be another
-Executor, and nothing else here needs to change.
+An Executor does the work for one request, inside a workspace it is given,
+and says how it went. It knows nothing about claiming, statuses, timestamps
+or projects. The runner owns the lifecycle and assembles the context: it
+claims a request, has a WorkspaceResolver turn it into an ExecutionWorkspace
+(projects.py), and only then calls the executor. Executors: FakeExecutor and
+ClaudeCodeExecutor.
 
 This module knows work requests and executors only: no ADK, Telegram, Linear
 or model. The database is the source of truth for execution state.
@@ -28,6 +30,8 @@ import logging
 import os
 import socket
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -45,11 +49,33 @@ class ExecutionResult(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ExecutionWorkspace:
+    """Where an executor works and how the work is checked; resolved by the runner.
+
+    path: the only directory the work may read and change.
+    test_command: the exact command that checks the work.
+    readable: extra paths the checks may read (e.g. the test interpreter).
+    """
+
+    path: Path
+    test_command: str
+    readable: tuple[Path, ...] = ()
+
+
+class WorkspaceError(Exception):
+    """No workspace can be made for a request (no project, unknown project, clone failed)."""
+
+
+class WorkspaceResolver(Protocol):
+    def resolve(self, request: WorkRequest) -> ExecutionWorkspace: ...
+
+
 class Executor(Protocol):
     name: str
 
-    def execute(self, request: WorkRequest) -> ExecutionResult:
-        """Do the work for one request (it is already claimed and running)."""
+    def execute(self, request: WorkRequest, workspace: ExecutionWorkspace) -> ExecutionResult:
+        """Do the work for one request (claimed and running) inside the given workspace."""
         ...
 
 
@@ -58,16 +84,18 @@ def worker_id(executor: Executor) -> str:
     return f"{executor.name}@{socket.gethostname()}:{os.getpid()}"
 
 
-def run_next(store: WorkRequestStore, executor: Executor) -> WorkRequest | None:
+def run_next(store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver) -> WorkRequest | None:
     """Claim the oldest pending request and run it. None if nothing is pending."""
     claimed = store.claim_next(worker_id(executor))
     if claimed is None:
         log.info("no pending work requests")
         return None
-    return _run_claimed(store, executor, claimed)
+    return _run_claimed(store, executor, resolver, claimed)
 
 
-def run_request(store: WorkRequestStore, executor: Executor, work_request_id: str) -> tuple[WorkRequest, bool]:
+def run_request(
+    store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver, work_request_id: str
+) -> tuple[WorkRequest, bool]:
     """Run one specific request, if it's pending.
 
     Returns the request as it now is, and whether this call executed it.
@@ -81,15 +109,25 @@ def run_request(store: WorkRequestStore, executor: Executor, work_request_id: st
             raise InvalidTransition(f"{work_request_id} does not exist")
         log.info("%s is %s; not executing it", work_request_id, current.status)
         return current, False
-    return _run_claimed(store, executor, claimed), True
+    return _run_claimed(store, executor, resolver, claimed), True
 
 
-def _run_claimed(store: WorkRequestStore, executor: Executor, claimed: WorkRequest) -> WorkRequest:
+def _run_claimed(
+    store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver, claimed: WorkRequest
+) -> WorkRequest:
     wr = claimed.work_request_id
-    log.info("%s claimed by %s (issue %s)", wr, claimed.claimed_by, claimed.issue_id)
+    log.info("%s claimed by %s (issue %s, project %s)", wr, claimed.claimed_by, claimed.issue_id, claimed.project_id)
+    # The runner assembles the context: the executor gets a ready workspace or never runs.
+    try:
+        workspace = resolver.resolve(claimed)
+    except WorkspaceError as exc:
+        failed = store.fail_to_start(wr, str(exc))
+        log.warning("%s not started: %s", wr, exc)
+        return failed
+    log.info("%s workspace %s", wr, workspace.path)
     running = store.start(wr)
     try:
-        result = executor.execute(running)
+        result = executor.execute(running, workspace)
     except Exception as exc:  # the executor failed; a crash (SystemExit, a killed process) isn't caught
         log.exception("%s: executor %s raised", wr, executor.name)
         result = ExecutionResult(outcome="failed", message=f"{executor.name} raised {type(exc).__name__}: {exc}")
@@ -134,16 +172,22 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(store: WorkRequestStore, work_request_id: str | None) -> int:
-    from cycle_runner.fake_executor import FakeExecutor  # the only executor V0.9 has
+    from cycle_runner.fake_executor import FakeExecutor  # the only executor the CLI runs
+    from cycle_runner.projects import ProjectConfigError, WorkspaceResolver, load_projects
 
+    try:
+        resolver = WorkspaceResolver(load_projects())
+    except ProjectConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     executor = FakeExecutor()
     if work_request_id:
-        request, executed = run_request(store, executor, work_request_id)
+        request, executed = run_request(store, executor, resolver, work_request_id)
         if not executed:
             print(f"{request.work_request_id} is already {request.status}; nothing executed.")
             return 0
     else:
-        request = run_next(store, executor)
+        request = run_next(store, executor, resolver)
         if request is None:
             print("No pending work requests.")
             return 0
