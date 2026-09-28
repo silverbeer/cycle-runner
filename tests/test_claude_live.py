@@ -139,3 +139,31 @@ def test_code_the_agent_runs_cannot_escape_the_workspace(tmp_path, work_request_
     assert sorted(set(results["credentials"]) & ours) == []
     assert hashlib.sha256(neighbour.read_bytes()).hexdigest() == before
     assert not marker.exists()
+
+
+def test_a_project_work_request_runs_in_a_fresh_clone_and_the_origin_is_untouched(
+    tmp_path, work_request_db, projects_config
+):
+    # V1.1 end to end: project id -> projects.toml -> resolver -> fresh clone -> Claude -> tests.
+    from test_projects import _tree_hash
+
+    from cycle_runner.projects import WorkspaceResolver, load_projects
+
+    config = load_projects()
+    origin = config.projects["DEMO"].repository
+    before = _tree_hash(origin)
+    store = WorkRequestStore(work_request_db)
+    request, _ = store.create_for_approval(
+        recommendation_id="rec-e2e", issue_id="TEST-9", approved_by="tests", approved_at=datetime.now(UTC),
+        cycle_number=1, title_at_approval=GREET_TASK, rationale="End-to-end project check.", project_id="DEMO",
+    )
+
+    done, executed = run_request(store, ClaudeCodeExecutor(max_budget_usd=1.0), WorkspaceResolver(config),
+                                 request.work_request_id)
+
+    assert executed and done.status == "completed", done.result_message
+    clone = config.workspace_root / request.work_request_id
+    workspace = type("W", (), {"path": clone, "test_command": config.projects["DEMO"].test_command})
+    assert "src/hello.py" in changed_files(workspace)
+    assert run_tests(workspace).returncode == 0
+    assert _tree_hash(origin) == before  # only the clone changed
