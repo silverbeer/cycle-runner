@@ -278,7 +278,7 @@ def test_success_needs_a_clean_run_passing_tests_and_a_change():
                                     "tests_command": "x"}), ["a"], "reports failure: Can't do it."),
         (_result(structured_output={"outcome": "completed", "summary": "Done.", "tests_passed": False,
                                     "tests_command": "x"}), ["a"], "reports failure: Done."),
-        (_result(), [], "changed no files"),
+        (_result(), [], "No change made. The coding agent reports: Added greet()."),
     ],
 )
 def test_anything_less_is_a_failure(message, files, expected):
@@ -437,3 +437,48 @@ def test_tool_output_in_parts_is_read_as_text(workspace):
     )
     assert transcript.test_runs == [(1, "Ran 1\n\nOK")]
     assert transcript.verdict(r"^OK$") is None
+
+
+def test_test_byproducts_are_not_the_agents_changes(workspace, work_request_db, monkeypatch):
+    # Found live on MT: the work was already done, the agent changed nothing,
+    # and pytest's temp files and logs made it look like a change.
+    request = _request(WorkRequestStore(work_request_db))
+
+    def tests_leave_files(cwd, prompt, options):
+        (cwd / "logs").mkdir()
+        (cwd / "logs" / "pytest.log").write_text("ran\n")
+        (cwd / "pytest-of-someone" / "session.json").parent.mkdir()
+        (cwd / "pytest-of-someone" / "session.json").write_text("{}")
+
+    monkeypatch.setattr(claude_executor, "query", _fake_query(tests_leave_files, _result(), _test_run(workspace)))
+
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
+
+    assert result.outcome == "failed" and result.message.startswith("No change made.")
+    assert result.details["files_changed"] == [] and result.details["other_new_files"] == 2
+
+
+def test_new_files_the_agent_wrote_and_edits_to_existing_files_count(workspace, work_request_db, monkeypatch):
+    request = _request(WorkRequestStore(work_request_db))
+
+    def agent(cwd, prompt, options):
+        (cwd / "src" / "hello.py").write_text("changed\n")
+        (cwd / "tests" / "test_greet.py").write_text("# new test\n")
+        (cwd / "junk.log").write_text("byproduct\n")
+
+    messages = [_tool_call("w", "Write", file_path=str(workspace.path / "tests" / "test_greet.py")),
+                _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace)]
+    monkeypatch.setattr(claude_executor, "query", _fake_query(agent, _result(), messages))
+
+    result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
+
+    assert result.outcome == "completed", result.message
+    assert result.details["files_changed"] == ["src/hello.py", "tests/test_greet.py"]
+    assert result.details["other_new_files"] == 1
+
+
+def test_a_long_list_of_changes_is_shortened_in_the_message():
+    files = [f"f{i}.py" for i in range(14)]
+    result = to_execution_result(_result(), files)
+    assert result.message.endswith("f9.py and 4 more)")
+    assert result.details["files_changed"] == files

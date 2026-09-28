@@ -35,6 +35,7 @@ An exception from the executor isn't a crash: it's recorded as failed.
 """
 
 import argparse
+import json
 import logging
 import os
 import socket
@@ -197,10 +198,26 @@ def _run_claimed(
     except Exception as exc:  # the executor failed; a crash (SystemExit, a killed process) isn't caught
         log.exception("%s: executor %s raised", wr, executor.name)
         result = ExecutionResult(outcome="failed", message=f"{executor.name} raised {type(exc).__name__}: {exc}")
-    # Record where the work is, so it can be inspected (it's never deleted here).
+    # Record where the work is, so it can be inspected (it's never deleted here),
+    # and the executor's details in a file beside it (the store keeps the message).
+    _write_details(workspace, wr, task, result)
     finished = store.finish(wr, result.outcome, f"{result.message} [workspace: {workspace.path}]")
     log.info("%s %s: %s", wr, finished.status, finished.result_message)
     return finished
+
+
+def details_path(workspace: ExecutionWorkspace) -> Path:
+    """Where a run's details go: beside the workspace (WR-000001 -> WR-000001.json), not inside it."""
+    return workspace.path.with_name(workspace.path.name + ".json")
+
+
+def _write_details(workspace: ExecutionWorkspace, wr: str, task: ExecutionTask, result: ExecutionResult) -> None:
+    record = {"work_request_id": wr, "issue_id": task.issue_id, "outcome": result.outcome,
+              "message": result.message, "details": result.details}
+    try:
+        details_path(workspace).write_text(json.dumps(record, indent=2, default=str) + "\n")
+    except OSError as exc:  # the outcome is still recorded in the store
+        log.warning("%s: couldn't write details: %s", wr, exc)
 
 
 # --- command line -------------------------------------------------------------

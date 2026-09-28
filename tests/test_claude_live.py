@@ -102,6 +102,9 @@ class Environment(unittest.TestCase):
             "read_neighbour": attempt(lambda: pathlib.Path({neighbour!r}).read_text()),
             "write_neighbour": attempt(lambda: pathlib.Path({neighbour!r}).write_text("changed")),
             "write_home": attempt(lambda: (home / "cycle-runner-escape-marker").write_text("x")),
+            # Claude Code's shared temp area holds every session's files (V1.2 finding).
+            "write_claude_temp": attempt(lambda: pathlib.Path({claude_temp!r}).write_text("x")),
+            "write_git": attempt(lambda: pathlib.Path(".git/cycle-runner-probe").write_text("x")),
             "network": attempt(lambda: socket.create_connection(("example.com", 443), timeout=5)),
             "credentials": sorted(
                 name for name in os.environ
@@ -119,7 +122,10 @@ def test_code_the_agent_runs_cannot_escape_the_workspace(tmp_path, work_request_
     neighbour.write_text("untouched")
     before = hashlib.sha256(neighbour.read_bytes()).hexdigest()
     marker = Path.home() / "cycle-runner-escape-marker"
-    probe = textwrap.dedent(PROBE_TEST).format(home=str(Path.home()), neighbour=str(neighbour))
+    claude_temp = Path(f"/private/tmp/claude-{os.getuid()}/cycle-runner-escape-marker")
+    probe = textwrap.dedent(PROBE_TEST).format(
+        home=str(Path.home()), neighbour=str(neighbour), claude_temp=str(claude_temp)
+    )
     workspace = make_repo(tmp_path / "repo", {"tests/test_environment.py": probe})
     store = WorkRequestStore(work_request_db)
     wr = _pending(store, "Run the test suite and report whether it passes. Do not change any code.")
@@ -128,7 +134,8 @@ def test_code_the_agent_runs_cannot_escape_the_workspace(tmp_path, work_request_
 
     results = json.loads((workspace.path / "probe_results.json").read_text())
     assert results["read_workspace"] == "allowed"
-    for escape in ("read_home", "read_ssh", "read_neighbour", "write_neighbour", "write_home", "network"):
+    for escape in ("read_home", "read_ssh", "read_neighbour", "write_neighbour", "write_home", "network",
+                   "write_claude_temp", "write_git"):
         assert results[escape].startswith("blocked"), (escape, results[escape])
     # No credential from the executor's own environment (the Claude login, and in
     # a normal shell OP_SERVICE_ACCOUNT_TOKEN, LINEAR_API_KEY, ...) reaches the
@@ -138,7 +145,8 @@ def test_code_the_agent_runs_cannot_escape_the_workspace(tmp_path, work_request_
     assert "CLAUDE_CODE_OAUTH_TOKEN" in ours  # the check is meaningful: we do hold credentials
     assert sorted(set(results["credentials"]) & ours) == []
     assert hashlib.sha256(neighbour.read_bytes()).hexdigest() == before
-    assert not marker.exists()
+    assert not marker.exists() and not claude_temp.exists()
+    assert not (workspace.path / ".git" / "cycle-runner-probe").exists()
 
 
 def test_a_project_work_request_runs_in_a_fresh_clone_and_the_origin_is_untouched(

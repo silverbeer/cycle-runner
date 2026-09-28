@@ -303,6 +303,7 @@ class Transcript:
         self.test_command = test_command
         self.calls = 0
         self.last_edit = 0  # the call number of the last Edit/Write attempt
+        self.written: set[str] = set()  # file_path of every Edit/Write attempt, as given
         self.test_runs: list[tuple[int, str]] = []  # (call number, output)
         self._pending: dict[str, int] = {}
 
@@ -313,6 +314,7 @@ class Transcript:
                     self.calls += 1
                     if block.name in WRITE_TOOLS:
                         self.last_edit = self.calls
+                        self.written.add(str(block.input.get("file_path", "")))
                     elif block.name == "Bash" and " ".join(str(block.input.get("command", "")).split()) == self.test_command:
                         self._pending[block.id] = self.calls
         elif isinstance(message, UserMessage) and isinstance(message.content, list):
@@ -333,9 +335,26 @@ class Transcript:
 
     def details(self) -> dict[str, Any]:
         return {
+            "tool_calls": self.calls,
+            "files_written_by_agent": sorted(self.written),
             "tests_observed": len(self.test_runs),
             "tests_output_tail": self.test_runs[-1][1][-self.OUTPUT_TAIL:] if self.test_runs else "",
         }
+
+
+def agent_changes(before: dict[str, str], after: dict[str, str], written: set[str], root: Path) -> tuple[list[str], int]:
+    """The files the agent changed, and how many other files appeared.
+
+    Running tests leaves byproducts in the workspace (logs, pytest's temp
+    directories, ...). Found live on MT: they alone made a no-op run look
+    like a change. So a change counts if it touches a file that existed
+    before, or a new file the agent itself wrote with Edit or Write.
+    """
+    root = root.resolve()
+    targets = {str(_inside(path, root).relative_to(root)) for path in written if _inside(path, root)}
+    differ = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+    changed = [path for path in differ if path in before or path in targets]
+    return changed, len(differ) - len(changed)
 
 
 def _text(content: str | list[dict[str, Any]] | None) -> str:
@@ -373,7 +392,10 @@ def to_execution_result(message: ResultMessage | None, files_changed: list[str],
     if report.outcome != "completed" or not report.tests_passed:
         return ExecutionResult(outcome="failed", message=f"The coding agent reports failure: {report.summary}", details=details)
     if not files_changed:
-        return ExecutionResult(outcome="failed", message="The coding agent reports success but changed no files.", details=details)
+        # Possibly right (the work may already be done), but nothing was delivered: a human decides.
+        return ExecutionResult(
+            outcome="failed", message=f"No change made. The coding agent reports: {report.summary}", details=details
+        )
     problem = transcript.verdict(success_pattern) if transcript else None
     if problem:
         return ExecutionResult(
@@ -381,9 +403,14 @@ def to_execution_result(message: ResultMessage | None, files_changed: list[str],
         )
     return ExecutionResult(
         outcome="completed",
-        message=f"{report.summary} (tests passed; changed {', '.join(files_changed)})",
+        message=f"{report.summary} (tests passed; changed {_listed(files_changed)})",
         details=details,
     )
+
+
+def _listed(paths: list[str], limit: int = 10) -> str:
+    shown = ", ".join(paths[:limit])
+    return shown if len(paths) <= limit else f"{shown} and {len(paths) - limit} more"
 
 
 def _denial(denial: Any) -> str:
@@ -422,9 +449,10 @@ class ClaudeCodeExecutor:
             return ExecutionResult(
                 outcome="failed", message=f"The coding agent could not run: {type(exc).__name__}: {exc}"
             )
-        after = _snapshot(workspace.path)
-        changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-        return to_execution_result(message, changed, transcript, workspace.test_success_pattern)
+        changed, byproducts = agent_changes(before, _snapshot(workspace.path), transcript.written, workspace.path)
+        result = to_execution_result(message, changed, transcript, workspace.test_success_pattern)
+        result.details["other_new_files"] = byproducts
+        return result
 
     async def _run_agent(self, task: ExecutionTask, workspace: ExecutionWorkspace,
                          transcript: Transcript) -> ResultMessage | None:

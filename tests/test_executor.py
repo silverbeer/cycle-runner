@@ -352,3 +352,24 @@ def test_cli_backfills_a_missing_project_only(store, capsys):
     assert f"{wr} SB-640 pending (project MT)" in capsys.readouterr().out
     assert _cli("backfill-project", wr, "TRD") == 2
     assert f"error: {wr} already has project MT" in capsys.readouterr().err
+
+
+def test_the_runs_details_are_kept_beside_the_workspace(store, tmp_path):
+    import json
+
+    from cycle_runner.executor import ExecutionWorkspace, details_path
+
+    workspace = ExecutionWorkspace(path=tmp_path / "workspaces" / "WR-000001", test_command="true")
+    workspace.path.mkdir(parents=True)
+    wr = _approve(store)
+
+    class Detailed(Spy):
+        def execute(self, task, workspace):
+            return ExecutionResult(outcome="completed", message="done", details={"cost_usd": 0.5})
+
+    run_next(store, Detailed(), type("R", (), {"resolve": lambda self, r: workspace})())
+
+    record = json.loads(details_path(workspace).read_text())
+    assert details_path(workspace) == tmp_path / "workspaces" / "WR-000001.json"  # not inside the clone
+    assert record == {"work_request_id": wr, "issue_id": "SB-640", "outcome": "completed", "message": "done",
+                      "details": {"cost_usd": 0.5}}
