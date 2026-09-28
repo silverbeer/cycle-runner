@@ -278,3 +278,71 @@ def _advance(store, wr, status):
             store.finish(wr, "completed", "done")
         else:
             store.finish(wr, "failed", "boom")
+
+
+# --- V1.1: project_id, fail_to_start, migration from V0.9 ------------------------
+
+
+def test_the_project_is_recorded_with_the_approval(store):
+    request, _ = store.create_for_approval(
+        recommendation_id="rec-p", issue_id="SB-640", approved_by="telegram:1",
+        approved_at=datetime.now(UTC), cycle_number=10, title_at_approval="t", rationale="r", project_id="MT",
+    )
+    assert request.project_id == "MT" and store.get(request.work_request_id).project_id == "MT"
+
+
+def test_a_request_approved_without_a_project_has_none(store):
+    assert store.get(_approve(store)).project_id is None
+
+
+def test_fail_to_start_ends_a_claimed_request_that_never_ran(store):
+    wr = _approve(store)
+    store.claim(wr, "x")
+
+    failed = store.fail_to_start(wr, "unknown project 'ZZ'")
+
+    assert (failed.status, failed.result_message) == ("failed", "Not started: unknown project 'ZZ'")
+    assert failed.started_at is None  # it never ran
+
+
+@pytest.mark.parametrize("reach", ["pending", "running", "completed"])
+def test_fail_to_start_only_applies_to_claimed_requests(store, reach):
+    wr = _approve(store)
+    _advance(store, wr, reach)
+    with pytest.raises(InvalidTransition, match=f"is {reach}, not claimed"):
+        store.fail_to_start(wr, "x")
+
+
+V09_SCHEMA = V08_SCHEMA.replace(
+    "status            TEXT NOT NULL CHECK (status IN ('pending')),",
+    "status            TEXT NOT NULL CHECK (status IN ('pending', 'claimed', 'running', 'completed', 'failed')),",
+).replace(
+    "rationale         TEXT NOT NULL\n);",
+    "rationale         TEXT NOT NULL,\n    claimed_by TEXT, claimed_at TEXT, started_at TEXT, finished_at TEXT, result_message TEXT\n);",
+)
+V09_TRIGGER = """
+CREATE TRIGGER work_request_transitions BEFORE UPDATE OF status ON work_requests
+WHEN NEW.status <> OLD.status AND OLD.status || '->' || NEW.status NOT IN
+    ('claimed->pending', 'claimed->running', 'pending->claimed', 'running->completed', 'running->failed')
+BEGIN SELECT RAISE(ABORT, 'invalid work request transition'); END;
+"""
+
+
+def test_a_v09_database_is_migrated_to_v11(tmp_path):
+    path = tmp_path / "v09.db"
+    with sqlite3.connect(path) as db:
+        db.executescript(V09_SCHEMA + V09_TRIGGER + "PRAGMA user_version = 2;")
+        db.execute(
+            "INSERT INTO work_requests (recommendation_id, issue_id, status, approved_by, approved_at, cycle_number,"
+            " title_at_approval, rationale) VALUES ('rec-1', 'SB-640', 'pending', 'telegram:1',"
+            " '2026-09-27T22:54:39+00:00', 10, 'Prod admin password', 'Urgent')"
+        )
+
+    store = WorkRequestStore(path)
+
+    (request,) = store.list_all()
+    assert (request.work_request_id, request.status, request.project_id) == ("WR-000001", "pending", None)
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    store.claim("WR-000001", "x")
+    assert store.fail_to_start("WR-000001", "no project").status == "failed"  # the new trigger rule applies

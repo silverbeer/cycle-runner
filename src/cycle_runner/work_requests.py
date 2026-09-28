@@ -10,8 +10,8 @@ Lifecycle (TRANSITIONS below is the only definition of it; the database
 trigger is generated from it):
 
     pending ──claim──► claimed ──start──► running ──finish──► completed
-       ▲                  │                   └────finish──► failed
-       └────release───────┘                   running ──abandon──► failed
+       ▲                  │   │               └────finish──► failed
+       └────release───────┘   └─fail_to_start─► failed     running ──abandon──► failed
 
 - claimed and running are different on purpose. claimed means the executor
   was never called, so nothing ran and release is safe. running means work
@@ -37,7 +37,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 DEFAULT_DB_PATH = "data/cycle-runner.db"
-SCHEMA_VERSION = 2  # 0/1: V0.8 (pending only). 2: V0.9 lifecycle.
+SCHEMA_VERSION = 3  # 0/1: V0.8 (pending only). 2: V0.9 lifecycle. 3: V1.1 project_id.
 
 Status = Literal["pending", "claimed", "running", "completed", "failed"]
 STATUSES = ("pending", "claimed", "running", "completed", "failed")
@@ -47,6 +47,7 @@ TRANSITIONS = {
     ("running", "completed"),  # finish
     ("running", "failed"),  # finish, or abandon a stranded run
     ("claimed", "pending"),  # release a stranded claim (nothing ran)
+    ("claimed", "failed"),  # couldn't start: no workspace for it (nothing ran)
 }
 
 TABLE = f"""
@@ -64,7 +65,8 @@ CREATE TABLE {{name}} (
     claimed_at        TEXT,
     started_at        TEXT,
     finished_at       TEXT,
-    result_message    TEXT
+    result_message    TEXT,
+    project_id        TEXT                                -- Linear's repo label (MT, TRD, ...); NULL before V1.1
 )
 """
 
@@ -113,6 +115,7 @@ class WorkRequest(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     result_message: str | None = None
+    project_id: str | None = None
 
 
 class InvalidTransition(Exception):
@@ -160,7 +163,7 @@ class WorkRequestStore:
             ).fetchone()
             if not exists:
                 db.execute(TABLE.format(name="work_requests"))
-            elif version < SCHEMA_VERSION:
+            elif version < 2:
                 # V0.8 -> V0.9. SQLite can't change a CHECK constraint, so rebuild
                 # the table, keeping every row, id and the never-reuse counter.
                 sequence = db.execute(
@@ -177,6 +180,13 @@ class WorkRequestStore:
                         "UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'work_requests'",
                         (sequence[0],),
                     )
+            elif version < 3:
+                # V0.9 -> V1.1: a new nullable column; existing rows have no project.
+                db.execute("ALTER TABLE work_requests ADD COLUMN project_id TEXT")
+            # Recreate the triggers every time so they always match TRANSITIONS
+            # (CREATE ... IF NOT EXISTS would keep an older version's rules).
+            db.execute("DROP TRIGGER IF EXISTS work_request_transitions")
+            db.execute("DROP TRIGGER IF EXISTS work_request_starts_pending")
             for trigger in TRIGGERS:  # one at a time: executescript would commit mid-migration
                 db.execute(trigger)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -199,6 +209,7 @@ class WorkRequestStore:
         cycle_number: int,
         title_at_approval: str,
         rationale: str,
+        project_id: str | None = None,
     ) -> tuple[WorkRequest, bool]:
         """Record an approval as a pending work request, at most once per recommendation.
 
@@ -212,8 +223,9 @@ class WorkRequestStore:
             cursor = db.execute(
                 """
                 INSERT INTO work_requests (recommendation_id, issue_id, status, approved_by,
-                                           approved_at, cycle_number, title_at_approval, rationale)
-                VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+                                           approved_at, cycle_number, title_at_approval, rationale,
+                                           project_id)
+                VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (recommendation_id) DO NOTHING
                 """,
                 (
@@ -224,6 +236,7 @@ class WorkRequestStore:
                     cycle_number,
                     title_at_approval,
                     rationale,
+                    project_id,
                 ),
             )
             created = cursor.rowcount == 1
@@ -267,6 +280,15 @@ class WorkRequestStore:
     def finish(self, work_request_id: str, outcome: Literal["completed", "failed"], message: str) -> WorkRequest:
         return self._transition(
             work_request_id, "running", outcome, finished_at=_now(), result_message=message
+        )
+
+    def fail_to_start(self, work_request_id: str, reason: str) -> WorkRequest:
+        """A claimed request that can't be executed (e.g. no workspace for its project).
+
+        Nothing ran, so it isn't "running"; releasing it would only fail again.
+        """
+        return self._transition(
+            work_request_id, "claimed", "failed", finished_at=_now(), result_message=f"Not started: {reason}"
         )
 
     def release(self, work_request_id: str) -> WorkRequest:
