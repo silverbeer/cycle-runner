@@ -201,3 +201,19 @@ def test_approval_starts_no_agent_process_or_tool(chat, monkeypatch):
     assert len(chat.llm.requests) == calls_before  # no model: no agent ran
     assert not any(event.get_function_calls() for event in chat.events)  # no tool
     assert len(_requests()) == 1  # the one side effect that did happen
+
+
+def test_the_work_request_records_the_project_linear_labelled(monkeypatch):
+    from conftest import fake_issue
+    from test_approval import ISSUES
+
+    issues = [fake_issue("TEST-2", "Fix the flaky login", "In Progress", "started", estimate=2,
+                         priority="High", project="MT")] + ISSUES[2:]
+    chat = Conversation(monkeypatch, issues=issues)
+    chat.send("What should we work on next?", recommend())
+
+    chat.send("yes")
+
+    (request,) = _requests()
+    assert (request.issue_id, request.project_id) == ("TEST-2", "MT")
+

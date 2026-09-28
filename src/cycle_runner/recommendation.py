@@ -72,6 +72,7 @@ class IssueFacts(BaseModel):
     estimate: float | None
     age_days: int
     blocked_by: list[str]
+    project: str | None = None  # Linear's repo label: which project the work belongs to
 
 
 class Candidate(BaseModel):
@@ -169,6 +170,7 @@ def build_recommendation(output: dict[str, Any], cycle: dict[str, Any] | None) -
                     estimate=issue["estimate"],
                     age_days=issue["age_days"],
                     blocked_by=issue["blocked_by"],
+                    project=issue.get("project"),
                 ),
                 rationale=choice.rationale,
             )

@@ -41,6 +41,7 @@ def test_cycle_status_lists_only_open_issues(fake_linear):
             "estimate": 2,
             "priority": "High",
             "labels": [],
+            "project": None,
             "age_days": 9,
             "blocked_by": [],
         },
@@ -51,6 +52,7 @@ def test_cycle_status_lists_only_open_issues(fake_linear):
             "estimate": 1,
             "priority": "Medium",
             "labels": [],
+            "project": None,
             "age_days": 9,
             "blocked_by": [],
         },
@@ -203,6 +205,7 @@ def test_get_issue_returns_the_issue_in_detail(fake_linear):
         "priority": "High",
         "assignee": "Pat Example",
         "labels": ["bug"],
+        "project": None,
         "cycle": 42,
         "blocked_by": [],
         "description": "Login fails about 1 in 20 runs on CI.",
@@ -290,3 +293,25 @@ def test_get_issue_reports_open_blockers(monkeypatch):
     monkeypatch.setattr(linear_tools, "_client", lambda: FakeLinear(issue=blocked))
 
     assert asyncio.run(get_issue("TEST-2"))["blocked_by"] == ["TEST-8"]
+
+
+# --- V1.1: the project comes from Linear's repo label group -------------------
+
+
+@pytest.mark.parametrize(
+    ("labels", "project"),
+    [
+        ([{"name": "MT", "parent": {"name": "repo"}}, {"name": "bug", "parent": {"name": "type"}}], "MT"),
+        ([{"name": "bug", "parent": {"name": "type"}}, {"name": "adhoc", "parent": None}], None),
+        ([{"name": "MT", "parent": {"name": "repo"}}, {"name": "TRD", "parent": {"name": "repo"}}], None),  # ambiguous
+        ([{"name": "MT"}], None),  # a label named like a project, but not in the repo group
+    ],
+)
+def test_the_project_is_the_single_label_in_the_repo_group(monkeypatch, labels, project):
+    issue = fake_issue("TEST-1", "t", "Todo", "unstarted")
+    issue["labels"]["nodes"] = labels
+    monkeypatch.setattr(linear_tools, "_client", lambda: FakeLinear(issues=[issue], issue={**FAKE_ISSUE, "labels": {"nodes": labels}}))
+
+    assert asyncio.run(get_cycle_status())["open_issues"][0]["project"] == project
+    assert asyncio.run(get_issue("TEST-1"))["project"] == project
+

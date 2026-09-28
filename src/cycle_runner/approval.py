@@ -131,6 +131,9 @@ def _approve(callback_context, pending: dict, turn: int) -> types.Content:
             cycle_number=recommendation["cycle_number"],
             title_at_approval=candidate["title"],
             rationale=candidate["rationale"],
+            # Which project the work belongs to, as Linear labelled it. The
+            # executor side maps it to a workspace; approval needs no config.
+            project_id=candidate["facts"].get("project"),
         )
     except Exception:
         log.exception("could not record the work request for %s", issue_id)

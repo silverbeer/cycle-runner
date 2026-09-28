@@ -47,7 +47,7 @@ FAKE_CYCLE = {
     "progress": 0.5,
 }
 def fake_issue(identifier, title, state, state_type, estimate=1, priority="No priority",
-               created="2030-01-01", labels=(), blocked_by=()):
+               created="2030-01-01", labels=(), blocked_by=(), project=None):
     """One issue node as the cycle query returns it. blocked_by: (id, state_type) pairs."""
     return {
         "identifier": identifier,
@@ -56,7 +56,10 @@ def fake_issue(identifier, title, state, state_type, estimate=1, priority="No pr
         "priorityLabel": priority,
         "createdAt": f"{created}T12:00:00.000Z",
         "state": {"name": state, "type": state_type},
-        "labels": {"nodes": [{"name": name} for name in labels]},
+        "labels": {
+            "nodes": [{"name": name, "parent": None} for name in labels]
+            + ([{"name": project, "parent": {"name": "repo"}}] if project else [])
+        },
         "inverseRelations": {
             "nodes": [
                 {"type": "blocks", "issue": {"identifier": blocker, "state": {"type": blocker_type}}}
