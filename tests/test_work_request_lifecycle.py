@@ -54,7 +54,7 @@ def test_running_to_completed(store):
     store.claim_next("x")
     store.start(wr)
 
-    done = store.finish(wr, "completed", "Fake execution completed.")
+    done = store.finish(wr, "changed", "Fake execution completed.")
 
     assert (done.status, done.result_message) == ("completed", "Fake execution completed.")
     assert done.claimed_at <= done.started_at <= done.finished_at
@@ -93,9 +93,9 @@ def test_an_already_claimed_request_cannot_be_claimed_again(store):
     ("reach", "operation"),
     [
         ("pending", lambda s, wr: s.start(wr)),
-        ("pending", lambda s, wr: s.finish(wr, "completed", "")),
+        ("pending", lambda s, wr: s.finish(wr, "changed", "")),
         ("pending", lambda s, wr: s.release(wr)),
-        ("claimed", lambda s, wr: s.finish(wr, "completed", "")),
+        ("claimed", lambda s, wr: s.finish(wr, "changed", "")),
         ("claimed", lambda s, wr: s.abandon(wr, "")),
         ("running", lambda s, wr: s.start(wr)),
         ("running", lambda s, wr: s.release(wr)),
@@ -103,7 +103,7 @@ def test_an_already_claimed_request_cannot_be_claimed_again(store):
         ("completed", lambda s, wr: s.finish(wr, "failed", "")),
         ("completed", lambda s, wr: s.release(wr)),
         ("completed", lambda s, wr: s.abandon(wr, "")),
-        ("failed", lambda s, wr: s.finish(wr, "completed", "")),
+        ("failed", lambda s, wr: s.finish(wr, "changed", "")),
     ],
 )
 def test_invalid_transitions_are_rejected(store, reach, operation):
@@ -275,7 +275,7 @@ def _advance(store, wr, status):
         elif step == "start":
             store.start(wr)
         elif step == "complete":
-            store.finish(wr, "completed", "done")
+            store.finish(wr, "changed", "done")
         else:
             store.finish(wr, "failed", "boom")
 
@@ -343,7 +343,7 @@ def test_a_v09_database_is_migrated_to_v11(tmp_path):
     (request,) = store.list_all()
     assert (request.work_request_id, request.status, request.project_id) == ("WR-000001", "pending", None)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
     store.claim("WR-000001", "x")
     assert store.fail_to_start("WR-000001", "no project").status == "failed"  # the new trigger rule applies
 
@@ -401,3 +401,67 @@ def test_only_a_pending_requests_project_can_be_backfilled(store, reach):
 def test_backfilling_an_unknown_request_fails(store):
     with pytest.raises(InvalidTransition, match="WR-000042 does not exist"):
         store.backfill_project("WR-000042", "MT")
+
+
+# --- V1.3: outcomes and the local delivery ------------------------------------------
+
+
+def _running(store):
+    wr = _approve(store)
+    store.claim(wr, "x")
+    store.start(wr)
+    return wr
+
+
+@pytest.mark.parametrize(("outcome", "status"), [("changed", "completed"), ("no_change", "completed"),
+                                                 ("failed", "failed")])
+def test_an_outcome_is_recorded_with_its_status(store, outcome, status):
+    wr = _running(store)
+    done = store.finish(wr, outcome, "m")
+    assert (done.status, done.outcome) == (status, outcome) and store.get(wr) == done
+
+
+def test_a_changed_run_records_its_branch_and_commit(store):
+    wr = _running(store)
+    done = store.finish(wr, "changed", "m", branch=f"cycle-runner/{wr}", commit_sha="a" * 40)
+    assert (done.branch, done.commit_sha) == (f"cycle-runner/{wr}", "a" * 40)
+
+
+@pytest.mark.parametrize("outcome", ["no_change", "failed"])
+def test_only_a_changed_run_has_a_branch_or_commit(store, outcome):
+    wr = _running(store)
+    with pytest.raises(ValueError, match="only a changed outcome"):
+        store.finish(wr, outcome, "m", branch="cycle-runner/x")
+    assert store.get(wr).status == "running"
+
+
+def test_runs_that_never_finish_normally_are_failed_outcomes(store):
+    unstarted, abandoned = _approve(store, 1), _approve(store, 2)
+    store.claim(unstarted, "x")
+    store.claim(abandoned, "x")
+    store.start(abandoned)
+    assert store.fail_to_start(unstarted, "no workspace").outcome == "failed"
+    assert store.abandon(abandoned, "died").outcome == "failed"
+
+
+@pytest.mark.parametrize(("status", "outcome"), [("completed", "failed"), ("failed", "changed"),
+                                                 ("failed", "no_change"), ("completed", "bogus")])
+def test_the_database_rejects_an_outcome_that_contradicts_the_status(store, status, outcome):
+    wr = _running(store)
+    with pytest.raises(sqlite3.IntegrityError):
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE work_requests SET status = ?, outcome = ? WHERE id = 1", (status, outcome))
+    assert store.get(wr).status == "running"
+
+
+def test_a_v11_database_is_migrated_to_v13_and_keeps_its_rows(tmp_path):
+    store = _legacy_request(tmp_path)  # V0.9 -> current, via V1.1's project_id
+    store.backfill_project("WR-000001", "MT")
+    (request,) = store.list_all()
+    assert (request.project_id, request.outcome, request.branch, request.commit_sha) == ("MT", None, None, None)
+    with sqlite3.connect(store.path) as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(work_requests)")}
+        assert {"project_id", "outcome", "branch", "commit_sha"} <= columns
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+    WorkRequestStore(store.path)  # opening again changes nothing
+    assert store.list_all() == [request]
