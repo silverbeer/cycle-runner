@@ -284,7 +284,8 @@ def test_only_the_resolver_reads_project_configuration():
 # --- V1.3: local git delivery ------------------------------------------------------
 
 GIT_OPERATIONS = {"rev-parse", "config", "remote", "status", "check-ref-format", "switch", "add", "diff",
-                  "commit", "diff-tree", "reset", "branch", "cat-file", "symbolic-ref", "rev-list", "log"}
+                  "commit", "diff-tree", "reset", "branch", "cat-file", "symbolic-ref", "rev-list", "log",
+                  "for-each-ref"}
 
 
 def _git_operations(module: str) -> set[str]:
@@ -333,12 +334,13 @@ def test_only_github_delivery_can_push_or_talk_to_github():
             continue
         assert "api.github.com" not in source and "github.com/{" not in source, path.name
         assert '"push"' not in source, path.name
-    assert _git_operations("github_delivery.py") == {"push"}
+    assert _git_operations("github_delivery.py") == {"init", "fetch", "rev-parse", "rev-list", "push"}
 
 
 def test_github_delivery_knows_nothing_about_claude_linear_or_the_conversation():
     imports = _imported_modules(PACKAGE / "github_delivery.py")
-    assert imports == {"base64", "logging", "re", "dataclasses", "typing", "httpx", "cycle_runner.executor",
+    assert imports == {"base64", "logging", "re", "tempfile", "dataclasses", "pathlib", "typing", "httpx",
+                       "cycle_runner.executor",
                        "cycle_runner.git_delivery", "cycle_runner.projects", "cycle_runner.work_requests"}
 
 

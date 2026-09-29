@@ -35,7 +35,9 @@ API in a header. It is never logged and is scrubbed from error text.
 import base64
 import logging
 import re
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -67,6 +69,8 @@ class PullRequest:
     url: str
     head_sha: str
     draft: bool
+    state: str = "open"
+    base: str = ""
 
 
 class GitHubApi:
@@ -188,7 +192,8 @@ class GitHubDelivery:
                     raise GitHubDeliveryError("remote", f"the approved commit's base {approval.base_sha[:12]} isn't on "
                                                         f"{approval.repository}'s {project.branch}; nothing pushed")
                 self._pusher.push(self.config.workspace_root / approval.work_request_id, url=self._url(approval),
-                                  sha=sha, branch=branch, token=self._token, protocol=self._push_protocol)
+                                  sha=sha, branch=branch, token=self._token, protocol=self._push_protocol,
+                                  tree_sha=approval.evidence.get("tree_sha", ""), base_sha=approval.base_sha)
             elif remote != sha:
                 raise GitHubDeliveryError("remote", f"{branch} already exists on GitHub at {remote[:12]}, not the "
                                                     f"approved {sha[:12]}; nothing pushed")
@@ -205,6 +210,11 @@ class GitHubDelivery:
                                                     f"the approved {sha[:12]}")
 
         pull = api.find_pull(branch)
+        if pull is not None and (pull.state != "open" or pull.base != project.branch or not pull.draft):
+            # Found in review: a closed, merged, retargeted or ready PR must not count as delivered.
+            raise GitHubDeliveryError("pr", f"PR #{pull.number} for {branch} is {pull.state}, "
+                                            f"{'a draft' if pull.draft else 'not a draft'}, against {pull.base}; "
+                                            "not reusing it")
         if pull is None:
             try:
                 pull = api.create_draft_pull(branch=branch, base=project.branch, title=pr_title(approval),
@@ -243,23 +253,41 @@ class GitHubDelivery:
 
 
 class _Pusher(CommitVerifier):
-    """The one push: the approved SHA to the approved branch, by URL, with an in-memory credential."""
+    """The one push: the approved SHA to the approved branch, by URL, with an in-memory credential.
+
+    Found in review: pushing from the workspace re-read its .git/config after
+    the audit (a pushInsteadOf could redirect the push, a proxy could see the
+    token). So the approved commit is first fetched into a fresh bare
+    repository Cycle Runner owns, checked there again (SHA, tree, parent), and
+    pushed from there. The workspace's configuration never takes part.
+    """
 
     def __init__(self, verifier: CommitVerifier | None):
         super().__init__()
         if verifier is not None:
             self.__dict__.update(verifier.__dict__)
 
-    def push(self, workspace, *, url: str, sha: str, branch: str, token: str, protocol: str) -> None:
+    def push(self, workspace, *, url: str, sha: str, branch: str, token: str, protocol: str,
+             tree_sha: str, base_sha: str) -> None:
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or not branch.startswith("cycle-runner/WR-"):
             raise GitHubDeliveryError("push", "refusing an unapproved ref")
         credential = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {credential}"}
         try:
-            with self._session():
-                self._git(workspace.resolve(), "push", "--porcelain", "--no-verify", "--no-follow-tags", url,
-                          f"{sha}:refs/heads/{branch}", extra_env=env, extra_config=(f"protocol.{protocol}.allow=always",))
+            with self._session(), tempfile.TemporaryDirectory(prefix="cycle-runner-push-") as scratch:
+                clean = Path(scratch) / "approved.git"
+                self._git(Path(scratch), "init", "--quiet", "--bare", str(clean))
+                self._git(clean, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", str(workspace.resolve()),
+                          f"refs/heads/{branch}:refs/heads/{branch}", extra_config=("protocol.file.allow=always",))
+                fetched = self._git(clean, "rev-parse", f"refs/heads/{branch}").stdout.strip()
+                tree = self._git(clean, "rev-parse", f"{sha}^{{tree}}", check=False).stdout.strip()
+                parents = self._git(clean, "rev-list", "--parents", "-n", "1", sha, check=False).stdout.split()[1:]
+                if (fetched, tree, parents) != (sha, tree_sha, [base_sha]):
+                    raise DeliveryError(f"the fetched commit ({fetched[:12]}) isn't the approved one")
+                self._git(clean, "push", "--porcelain", "--no-verify", "--no-follow-tags", url,
+                          f"{sha}:refs/heads/{branch}", extra_env=env,
+                          extra_config=(f"protocol.{protocol}.allow=always",))
         except DeliveryError as exc:
             raise GitHubDeliveryError("push", _scrub(str(exc), token, credential)) from None
 
@@ -274,11 +302,12 @@ def pr_body(approval: DeliveryApproval) -> str:
     diff = evidence.get("diff") or {}
     tests = evidence.get("tests") or {}
     if tests.get("observed_runs"):
+        last = _plain(tests.get("last_result") or "not captured")
         tests_line = (f"The test command ran {tests['observed_runs']} time(s) inside Cycle Runner's sandbox; the last "
-                      f"run's result: `{_neutral(tests.get('last_result') or 'not captured')}`.")
+                      f"run's result: `{last}`.")
     else:
         tests_line = "No test run was observed. Treat this change as untested."
-    files = "\n".join(f"- `{f['path']}` ({f['status']}, +{f['insertions']} -{f['deletions']})"
+    files = "\n".join(f"- `{_plain(f['path'])}` ({f['status']}, +{f['insertions']} -{f['deletions']})"
                       for f in diff.get("files", [])) or "- (none)"
     summary = _neutral(evidence.get("summary") or "(no summary)")[:BODY_SUMMARY_LIMIT]
     return (
@@ -301,14 +330,22 @@ def pr_body(approval: DeliveryApproval) -> str:
 
 def _neutral(text: str) -> str:
     """No @mentions and no issue-closing references from agent or issue text."""
-    text = re.sub(r"@(?=\w)", "@​", str(text))
-    return re.sub(r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)(\s*:?\s*)(#|\w[\w.-]*/[\w.-]+#)",
-                  lambda m: f"{m[1]}{m[3]}​{m[4]}", text)
+    text = re.sub(r"@(?=\w)", "@\u200b", str(text))
+    return re.sub(r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)(\s*:?\s*)(#|\w[\w.-]*/[\w.-]+#|https?://)",
+                  lambda m: f"{m[1]}{m[3]}\u200b{m[4]}", text)
+
+
+def _plain(text: str) -> str:
+    """For inside a code span: one line, no backticks or angle brackets (found in review)."""
+    text = "".join(ch if ch.isprintable() else " " for ch in str(text))
+    return _neutral(text.replace("`", "'").replace("<", "\u2039").replace(">", "\u203a"))[:300]
 
 
 def _pull(body: dict[str, Any]) -> PullRequest:
     return PullRequest(number=int(body["number"]), url=str(body["html_url"]),
-                       head_sha=str((body.get("head") or {}).get("sha", "")), draft=bool(body.get("draft")))
+                       head_sha=str((body.get("head") or {}).get("sha", "")), draft=bool(body.get("draft")),
+                       state="merged" if body.get("merged_at") else str(body.get("state", "")),
+                       base=str((body.get("base") or {}).get("ref", "")))
 
 
 def _message(response: httpx.Response) -> str:

@@ -128,6 +128,9 @@ def protected_reason(path: str) -> str | None:
     parts = PurePosixPath(path).parts
     if not parts or path.startswith("/") or ".." in parts:
         return "outside the workspace"
+    if any(not ch.isprintable() for ch in path) or "`" in path:
+        # Found in review: such names break out of Markdown in the PR body.
+        return "a name with control characters or backticks"
     for part in parts[:-1]:
         if part.lower() in PROTECTED_DIRS:
             return f"inside {part}/"
@@ -242,7 +245,14 @@ class LocalGitDelivery:
     # --- checks -------------------------------------------------------------------
 
     def _audit(self, root: Path) -> None:
-        """No remote, and nothing in .git/config beyond what a plain clone has."""
+        """No remote, nothing in .git/config beyond a plain clone, and no history rewriting."""
+        git_dir = root / ".git"
+        for oddity in ("info/grafts", "shallow", "objects/info/alternates", "objects/info/http-alternates",
+                       "commondir"):
+            if (git_dir / oddity).exists():
+                raise DeliveryError(f"the workspace's .git has {oddity}")
+        if self._git(root, "for-each-ref", "--format=%(refname)", "refs/replace/").stdout.strip():
+            raise DeliveryError("the workspace's .git has replace refs")
         if self._git(root, "remote").stdout.strip():
             raise DeliveryError("the workspace has a remote")
         listed = self._git(root, "config", "--local", "--name-only", "--list", "-z").stdout
@@ -342,6 +352,8 @@ class LocalGitDelivery:
             "PATH": self._path, "HOME": self._home, "XDG_CONFIG_HOME": self._home, "LC_ALL": "C",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
             "GIT_LITERAL_PATHSPECS": "1", "GIT_OPTIONAL_LOCKS": "0", "GIT_EDITOR": "true",
+            # Found in review: refs/replace/* made git show one tree while another was pushed.
+            "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_AUTHOR_NAME": AUTHOR_NAME, "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
             "GIT_COMMITTER_NAME": AUTHOR_NAME, "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
             **(extra_env or {}),

@@ -1761,6 +1761,28 @@ approved SHA is a delivery failure.
 - **Neutralized:** `@mentions` and issue-closing keywords from agent or
   issue text. The issue description isn't copied.
 
+### Found in an independent review, and fixed
+
+- **A rejected commit could be approved later.** A rejection is now final:
+  the store and a database trigger both refuse it.
+- **Agent-chosen file names and test output could break out of the PR's
+  Markdown.** For example, a backtick or newline in a path could add live
+  `@mentions`, issue-closing keywords or HTML. Such names are now never
+  committed and refuse approval. Test output is flattened, and closing
+  keywords with full URLs are neutralized too.
+- **Replace refs:** `refs/replace/*` let the human review one tree while
+  another was pushed. git now runs with `GIT_NO_REPLACE_OBJECTS=1`, and replace
+  refs, grafts, alternates or a shallow file refuse the delivery.
+- **The push re-read the workspace's `.git/config` after it was audited.** A
+  `pushInsteadOf` could redirect the push, or a proxy could see the token.
+  Now the approved branch is fetched into a fresh bare repository Cycle Runner
+  owns, and its SHA, tree and parent are checked again. The push happens from
+  there, so the workspace's configuration takes no part.
+- **An existing PR was reused whatever its state.** Now it's reused only if
+  it's open, a draft, and against the configured base. A closed, merged,
+  retargeted or ready PR stops delivery, including one GitHub created as
+  ready.
+
 ### Idempotency and recovery
 
 | Situation                                   | `deliver` does                                           |

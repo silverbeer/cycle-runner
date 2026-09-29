@@ -81,7 +81,8 @@ class FakeGitHub:
         if path == "/pulls" and request.method == "POST":
             body = json.loads(request.content)
             pull = {"number": len(self.pulls) + 1, "html_url": f"https://github.com/{REPO}/pull/{len(self.pulls) + 1}",
-                    "draft": body["draft"], "title": body["title"], "body": body["body"], "base": body["base"],
+                    "draft": body["draft"], "title": body["title"], "body": body["body"], "state": "open",
+                    "merged_at": None, "base": {"ref": body["base"]},
                     "head": {"ref": body["head"], "sha": git(self.bare, "rev-parse", f"refs/heads/{body['head']}")}}
             self.pulls.append(pull)
             return httpx.Response(201, json=pull)
@@ -308,7 +309,7 @@ def test_delivery_pushes_exactly_the_approved_commit_and_opens_a_draft_pr(setup)
     assert sorted(git(setup.bare, "for-each-ref", "--format=%(refname)").split()) == \
         ["refs/heads/cycle-runner/WR-000001", "refs/heads/main"]  # one branch, no tags
     (pull,) = setup.github.pulls
-    assert pull["draft"] is True and pull["base"] == "main" and pull["head"]["ref"] == "cycle-runner/WR-000001"
+    assert pull["draft"] is True and pull["base"]["ref"] == "main" and pull["head"]["ref"] == "cycle-runner/WR-000001"
     assert pull["title"] == "SB-640: Add a greet(name) function"
     body = pull["body"]
     for fact in ("Cycle Runner", "SB-640", "Add a greet(name) function", "DEMO", "WR-000001", setup.sha,
@@ -346,6 +347,7 @@ def test_an_existing_pr_for_the_approved_commit_is_reused(setup):
     subprocess.run(["git", "-C", str(setup.workspace), "push", "-q", str(setup.bare),
                     f"{setup.sha}:refs/heads/cycle-runner/WR-000001"], check=True)
     setup.github.pulls.append({"number": 9, "html_url": f"https://github.com/{REPO}/pull/9", "draft": True,
+                               "state": "open", "base": {"ref": "main"},
                                "head": {"ref": "cycle-runner/WR-000001", "sha": setup.sha}})
 
     approval = setup.delivery().deliver(setup.wr)
@@ -544,3 +546,111 @@ def test_pr_body_claims_no_tests_it_didnt_see(setup):
     evidence = {**approval.evidence, "tests": {"observed_runs": 0, "last_result": None}}
     body = pr_body(approval.model_copy(update={"evidence": evidence}))
     assert "No test run was observed" in body and "passed" not in body.split("### Tests")[1].split("###")[0]
+
+
+# --- found in review ---------------------------------------------------------------------------
+
+
+def test_a_rejected_commit_can_never_be_approved_afterwards(setup):
+    reject(setup.store, setup.wr, commit=setup.sha[:12], rejected_by="t", reason="no")
+    with pytest.raises(ApprovalRefused, match="was rejected"):
+        _approve(setup)
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError, match="not an approvable delivery"):
+        with sqlite3.connect(setup.store.path) as db:
+            db.execute("INSERT INTO delivery_approvals (work_request_id, commit_sha, branch, base_sha, project_id,"
+                       " repository, evidence, approved_by, approved_at, status) VALUES (?, ?, ?, ?, 'DEMO', ?, '{}',"
+                       " 'x', 'now', 'approved')", (setup.wr, setup.sha, "cycle-runner/WR-000001", "c" * 40, REPO))
+    assert review(setup.store, setup.config, setup.wr).state == "rejected"
+
+
+@pytest.mark.parametrize("name", ["docs/a` @victim Fixes #1 `.md", "notes\n\nFixes #3 <img src=x>\n.md"])
+def test_file_names_that_would_break_out_of_the_pr_body_are_refused(setup, name):
+    from cycle_runner.git_delivery import protected_reason
+
+    assert protected_reason(name) == "a name with control characters or backticks"
+    wr, sha = _manual_delivery(setup, {name: "x\n"})
+    with pytest.raises(ApprovalRefused, match="control characters or backticks"):
+        approve(setup.store, setup.config, wr, commit=sha[:12], approved_by="t")
+
+
+def test_test_output_and_urls_cant_inject_into_the_pr_body(setup):
+    approval = _approve(setup)
+    evidence = {**approval.evidence,
+                "tests": {"observed_runs": 1, "last_result": "1 passed `@x` <b>bold</b>\nFixes #4"},
+                "summary": "Closes https://github.com/o/r/issues/5 and fixes o/r#6 cc @admin"}
+    body = pr_body(approval.model_copy(update={"evidence": evidence}))
+    tests = body.split("### Tests")[1].split("###")[0]
+    assert "`@x`" not in tests and "<b>" not in tests and "\nFixes" not in tests
+    assert "Closes https://" not in body and "fixes o/r#6" not in body and "@admin" not in body
+
+
+@pytest.mark.parametrize("oddity", ["replace", "grafts", "alternates", "shallow"])
+def test_history_rewriting_in_the_workspace_refuses_approval(setup, tmp_path, oddity):
+    git_dir = setup.workspace / ".git"
+    if oddity == "replace":  # found in review: git showed one tree while another was pushed
+        other = git(setup.workspace, "commit-tree", "-p", f"{setup.sha}^", "-m", "benign",
+                    git(setup.workspace, "rev-parse", f"{setup.sha}^^{{tree}}"))
+        git(setup.workspace, "replace", setup.sha, other)
+    elif oddity == "grafts":
+        (git_dir / "info").mkdir(exist_ok=True)
+        (git_dir / "info" / "grafts").write_text(f"{setup.sha}\n")
+    elif oddity == "alternates":
+        (git_dir / "objects" / "info" / "alternates").write_text(str(tmp_path) + "\n")
+    else:
+        (git_dir / "shallow").write_text(git(setup.workspace, "rev-parse", "main") + "\n")
+    with pytest.raises(ApprovalRefused, match="approval refused"):
+        _approve(setup)
+
+
+def test_workspace_config_changed_between_verify_and_push_cant_redirect_the_push(setup, tmp_path, monkeypatch):
+    # Found in review: the push re-read the workspace's .git/config after it was audited.
+    _approve(setup)
+    evil = tmp_path / "evil.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(evil)], check=True)
+    real_contains = GitHubApi.contains
+
+    def race(self, *args):
+        git(setup.workspace, "config", f"url.{evil}.pushInsteadOf", str(setup.bare))
+        return real_contains(self, *args)
+
+    monkeypatch.setattr(GitHubApi, "contains", race)
+    assert setup.delivery().deliver(setup.wr).status == "pr_created"
+    assert git(setup.bare, "rev-parse", "refs/heads/cycle-runner/WR-000001") == setup.sha
+    assert git(evil, "for-each-ref") == ""  # nothing went to the redirected place
+
+
+@pytest.mark.parametrize(("change", "problem"), [
+    ({"state": "closed"}, "is closed"), ({"merged_at": "2026-01-01T00:00:00Z", "state": "closed"}, "is merged"),
+    ({"draft": False}, "not a draft"), ({"base": {"ref": "release"}}, "against release"),
+])
+def test_an_existing_pr_is_reused_only_if_open_draft_and_against_the_base(setup, change, problem):
+    _approve(setup)
+    subprocess.run(["git", "-C", str(setup.workspace), "push", "-q", str(setup.bare),
+                    f"{setup.sha}:refs/heads/cycle-runner/WR-000001"], check=True)
+    setup.github.pulls.append({"number": 9, "html_url": f"https://github.com/{REPO}/pull/9", "draft": True,
+                               "state": "open", "base": {"ref": "main"},
+                               "head": {"ref": "cycle-runner/WR-000001", "sha": setup.sha}, **change})
+    with pytest.raises(GitHubDeliveryError, match=problem):
+        setup.delivery().deliver(setup.wr)
+    assert setup.store.live_approval(setup.wr).status == "pushed"  # not marked delivered
+
+
+def test_a_pr_github_created_as_ready_is_never_accepted_on_retry(setup, monkeypatch):
+    _approve(setup)
+    real = setup.github.handle
+
+    def ready(request):
+        response = real(request)
+        if request.method == "POST":
+            setup.github.pulls[-1]["draft"] = False
+            return httpx.Response(201, json=setup.github.pulls[-1])
+        return response
+
+    monkeypatch.setattr(setup.github, "handle", ready)
+    with pytest.raises(GitHubDeliveryError, match="not a draft"):
+        setup.delivery().deliver(setup.wr)
+    with pytest.raises(GitHubDeliveryError, match="not a draft"):
+        setup.delivery().deliver(setup.wr)
+    assert setup.store.live_approval(setup.wr).status == "pushed"

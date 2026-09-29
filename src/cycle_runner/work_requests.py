@@ -183,12 +183,18 @@ APPROVAL_TRIGGERS = (
     """
     CREATE TRIGGER delivery_approval_only_for_a_delivered_change
     BEFORE INSERT ON delivery_approvals
-    WHEN NEW.status IN ('approved', 'rejected') AND NOT EXISTS (
+    WHEN (NEW.status IN ('approved', 'rejected') AND NOT EXISTS (
         SELECT 1 FROM work_requests
         WHERE 'WR-' || printf('%06d', id) = NEW.work_request_id
           AND status = 'completed' AND outcome = 'changed'
           AND commit_sha = NEW.commit_sha AND branch = NEW.branch
-    ) OR NEW.status NOT IN ('approved', 'rejected')
+    ))
+    OR NEW.status NOT IN ('approved', 'rejected')
+    -- found in review: a rejection must stay final
+    OR (NEW.status = 'approved' AND EXISTS (
+        SELECT 1 FROM delivery_approvals
+        WHERE work_request_id = NEW.work_request_id AND commit_sha = NEW.commit_sha AND status = 'rejected'
+    ))
     BEGIN
         SELECT RAISE(ABORT, 'not an approvable delivery');
     END
@@ -530,6 +536,8 @@ class WorkRequestStore:
         live = self.live_approval(work_request_id)
         if live:
             raise InvalidTransition(f"{work_request_id} already has {live.approval_id} ({live.status})")
+        if any(a.status == "rejected" and a.commit_sha == commit_sha for a in self.approvals_for(work_request_id)):
+            raise InvalidTransition(f"{commit_sha[:12]} was rejected; a rejected commit is never delivered")
         try:
             with self._connect() as db:
                 row = db.execute(
