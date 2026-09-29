@@ -447,7 +447,7 @@ def test_a_remote_branch_at_another_commit_stops_delivery(setup):
 def test_a_base_that_isnt_on_github_stops_delivery(setup):
     # The local repository's main is ahead of GitHub's: pushing would publish unrelated commits.
     _approve(setup)
-    fresh = make_repo(setup.bare.parent / "other")  # GitHub's main is unrelated history
+    fresh = make_repo(setup.bare.parent / "other", {"UNRELATED.md": "other history\n"})  # unrelated main
     subprocess.run(["git", "-C", str(fresh.path), "push", "-q", str(setup.bare), "main:refs/heads/main", "--force"],
                    check=True)
     with pytest.raises(GitHubDeliveryError, match="isn't on .* main; nothing pushed"):
