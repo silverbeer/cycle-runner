@@ -55,9 +55,9 @@ def test_telegram_adapter_does_not_depend_on_adk():
     assert not any(name.startswith("google") for name in imports), imports
 
 
-def test_only_the_linear_client_makes_http_calls():
+def test_only_the_linear_client_and_github_delivery_make_http_calls():
     users = [path.name for path in _modules() if "httpx" in _imported_modules(path)]
-    assert users == ["linear_client.py"]
+    assert users == ["github_delivery.py", "linear_client.py"]
 
 
 def test_only_the_linear_client_knows_how_linear_is_reached():
@@ -66,6 +66,7 @@ def test_only_the_linear_client_knows_how_linear_is_reached():
         for path in _modules()
         if path.name != "linear_client.py"
     }
+    leaks["github_delivery.py"] = [t for t in leaks.get("github_delivery.py", []) if t != "Authorization"]  # GitHub's
     assert {name: terms for name, terms in leaks.items() if terms} == {}
 
 
@@ -112,7 +113,8 @@ def test_only_approval_and_the_executor_can_reach_the_work_request_store():
         if path.name != "work_requests.py"
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
-    assert sorted(users) == ["approval.py", "executor.py", "git_delivery.py", "issue_context.py", "projects.py"]
+    assert sorted(users) == ["approval.py", "delivery_approval.py", "executor.py", "git_delivery.py",
+                             "github_delivery.py", "issue_context.py", "projects.py"]
 
 
 @pytest.mark.parametrize(
@@ -168,8 +170,8 @@ def test_the_conversation_side_cannot_start_execution():
     users = [path.name for path in _modules() if "cycle_runner.executor" in _imported_modules(path)]
     # The executors implement the interface and the resolver produces its
     # workspaces; nothing in the Telegram/ADK path imports it.
-    assert sorted(users) == ["claude_executor.py", "fake_executor.py", "git_delivery.py", "issue_context.py",
-                             "projects.py"]
+    assert sorted(users) == ["claude_executor.py", "delivery_approval.py", "fake_executor.py", "git_delivery.py",
+                             "github_delivery.py", "issue_context.py", "projects.py"]
 
 
 def test_importing_the_package_does_not_load_adk():
@@ -282,7 +284,8 @@ def test_only_the_resolver_reads_project_configuration():
 # --- V1.3: local git delivery ------------------------------------------------------
 
 GIT_OPERATIONS = {"rev-parse", "config", "remote", "status", "check-ref-format", "switch", "add", "diff",
-                  "commit", "diff-tree", "reset", "branch", "cat-file"}
+                  "commit", "diff-tree", "reset", "branch", "cat-file", "symbolic-ref", "rev-list", "log",
+                  "for-each-ref"}
 
 
 def _git_operations(module: str) -> set[str]:
@@ -312,10 +315,46 @@ def test_only_projects_and_delivery_start_processes():
 
 def test_delivery_knows_nothing_about_claude_linear_or_the_conversation():
     imports = _imported_modules(PACKAGE / "git_delivery.py")
-    assert imports == {"logging", "os", "re", "subprocess", "tempfile", "unicodedata", "pathlib", "typing", "cycle_runner.executor",
+    assert imports == {"logging", "os", "re", "subprocess", "tempfile", "unicodedata", "pathlib", "typing", "contextlib", "dataclasses", "cycle_runner.executor",
                        "cycle_runner.work_requests"}
 
 
 def test_the_claude_executor_cannot_deliver():
     imports = _imported_modules(PACKAGE / "claude_executor.py")
     assert "cycle_runner.git_delivery" not in imports and "subprocess" not in imports
+
+
+# --- V1.4: human-approved GitHub delivery --------------------------------------------------
+
+
+def test_only_github_delivery_can_push_or_talk_to_github():
+    for path in _modules():
+        source = path.read_text()
+        if path.name == "github_delivery.py":
+            continue
+        assert "api.github.com" not in source and "github.com/{" not in source, path.name
+        assert '"push"' not in source, path.name
+    assert _git_operations("github_delivery.py") == {"init", "fetch", "rev-parse", "rev-list", "push"}
+
+
+def test_github_delivery_knows_nothing_about_claude_linear_or_the_conversation():
+    imports = _imported_modules(PACKAGE / "github_delivery.py")
+    assert imports == {"base64", "logging", "re", "tempfile", "dataclasses", "pathlib", "typing", "httpx",
+                       "cycle_runner.executor",
+                       "cycle_runner.git_delivery", "cycle_runner.projects", "cycle_runner.work_requests"}
+
+
+def test_nothing_that_runs_or_commits_the_agents_work_can_reach_github():
+    for module in ("claude_executor.py", "git_delivery.py", "issue_context.py", "projects.py", "fake_executor.py",
+                   "delivery_approval.py", "approval.py", "agent.py", "telegram_adapter.py", "gateway.py"):
+        imports = _imported_modules(PACKAGE / module)
+        assert "cycle_runner.github_delivery" not in imports, module
+    source = (PACKAGE / "executor.py").read_text()
+    library, _, cli = source.partition("# --- command line")
+    assert "github_delivery" not in library and "github_delivery" in cli
+
+
+def test_approval_is_local_only():
+    imports = _imported_modules(PACKAGE / "delivery_approval.py")
+    assert not [n for n in imports if n.startswith(("httpx", "cycle_runner.github_delivery", "claude_agent_sdk",
+                                                    "cycle_runner.linear", "telegram", "subprocess"))], imports

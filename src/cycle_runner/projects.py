@@ -45,6 +45,7 @@ from cycle_runner.work_requests import WorkRequest
 DEFAULT_CONFIG_PATH = "projects.toml"
 PROJECT_ID = re.compile(r"^[A-Z][A-Z0-9]*$")
 SHELL_OPERATORS = re.compile(r"[;&|<>`$\\\n]")
+GITHUB_REPOSITORY = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 BRANCH = re.compile(r"^[A-Za-z0-9._/][A-Za-z0-9._/-]*$")
 ENV_ASSIGNMENT = re.compile(r"^[A-Z_][A-Z0-9_]*=")
 # What a setup command may run: a package manager's install step, which puts
@@ -79,6 +80,7 @@ class ProjectConfig(BaseModel):
     setup_command: str | None = None  # prepares dependencies in the clone, before the agent runs
     setup_produces: tuple[str, ...] = ()  # clone-relative paths setup must create, inside the clone
     test_success_pattern: str | None = None  # regex the agent's last test run output must match
+    github: str | None = None  # owner/name: where an approved delivery may be pushed (V1.4); needs branch
 
     @field_validator("repository", mode="before")
     @classmethod
@@ -152,10 +154,19 @@ class ProjectConfig(BaseModel):
                 raise ValueError(f"not a valid regular expression: {exc}") from None
         return value
 
+    @field_validator("github")
+    @classmethod
+    def _github(cls, value: str | None) -> str | None:
+        if value is not None and not GITHUB_REPOSITORY.match(value):
+            raise ValueError("must be a GitHub owner/name, like silverbeer/missing-table")
+        return value
+
     @model_validator(mode="after")
     def _setup_consistent(self) -> "ProjectConfig":
         if self.setup_produces and not self.setup_command:
             raise ValueError("setup_produces needs a setup_command")
+        if self.github and not self.branch:
+            raise ValueError("github needs branch: the base a delivery's PR targets")
         return self
 
 

@@ -30,4 +30,5 @@ markers = [
     "telegram: talks to the real Telegram API (skipped unless TELEGRAM_BOT_TOKEN is set)",
     "linear: talks to the real Linear API (skipped unless run under `op run` with Linear credentials)",
     "claude: runs a real Claude coding agent (skipped unless CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set)",
+    "github: pushes to and opens draft PRs on the disposable sandbox repo (skipped unless CYCLE_RUNNER_GITHUB_TOKEN is set)",
 ]
