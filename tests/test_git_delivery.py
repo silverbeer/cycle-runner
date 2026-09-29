@@ -538,8 +538,11 @@ def test_the_runner_records_any_delivery_crash_as_a_failed_run(store, workspace)
     assert done.result_message.startswith("Local delivery refused, nothing committed: RuntimeError: disk full")
 
 
-def test_a_decomposed_unicode_file_name_is_committed(store, workspace):
+@pytest.mark.parametrize("precompose", ["true", "false"])  # false: git reports names as stored, as on Linux
+def test_a_decomposed_unicode_file_name_is_committed(store, workspace, precompose):
     import unicodedata
+
+    subprocess.run(["git", "-C", str(workspace.path), "config", "core.precomposeunicode", precompose], check=True)
 
     decomposed = unicodedata.normalize("NFD", "src/café.py")
     result = _the_agents_change(workspace)

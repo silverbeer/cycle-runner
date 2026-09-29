@@ -185,8 +185,8 @@ class LocalGitDelivery:
         try:
             self._git(root, "add", "--all", "--", *sorted(include))
             diff = self._staged_diff(root)
-            staged = {entry["path"] for entry in diff["files"]}
-            if staged != include:
+            staged = {_nfc(entry["path"]) for entry in diff["files"]}
+            if staged != {_nfc(path) for path in include}:
                 raise DeliveryError(f"staged files {sorted(staged)} differ from the selected {sorted(include)}")
             # What git will commit, not what is on disk: found in review, attributes
             # (working-tree-encoding, filters, eol, ident) can transform content on add.
@@ -199,7 +199,7 @@ class LocalGitDelivery:
             committed = {_nfc(path) for path in self._git(
                 root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", "HEAD",
             ).stdout.split("\0") if path}
-            if self._git(root, "rev-parse", "HEAD^").stdout.strip() != base or committed != include:
+            if self._git(root, "rev-parse", "HEAD^").stdout.strip() != base or committed != {_nfc(p) for p in include}:
                 raise DeliveryError(f"the commit {commit[:12]} isn't exactly the selected change")
             self._audit(root)  # still no remote
         except BaseException:
@@ -226,8 +226,8 @@ class LocalGitDelivery:
         left: list[str] = []
         seen: set[str] = set()
         for entry in filter(None, entries.split("\0")):
-            code, path = entry[:2], _nfc(entry[3:])
-            seen.add(path)
+            code, path = entry[:2], entry[3:]  # git's own spelling, for git and the filesystem
+            seen.add(_nfc(path))
             if code[0] not in " ?":
                 raise DeliveryError(f"the index was changed outside Cycle Runner ({path})")
             reason = self._excluded(root, path, deleted=code[1] == "D", attributed=attributed)
@@ -235,7 +235,7 @@ class LocalGitDelivery:
                 left.append(f"{path}: {reason}")
             else:
                 include.add(path)
-        for path in sorted(attributed - seen):
+        for path in sorted(attributed - seen):  # both NFC
             left.append(f"{path}: ignored by the project's .gitignore")
         return include, left
 
@@ -243,7 +243,7 @@ class LocalGitDelivery:
         reason = protected_reason(path)
         if reason:
             return reason
-        if path not in attributed:
+        if _nfc(path) not in attributed:
             return "not a change the executor saw the agent make (e.g. a test byproduct)"
         if deleted:
             return None
