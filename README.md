@@ -1716,7 +1716,7 @@ be approved against the old request. A new explicit approval is needed.
 
 - **A fine-grained personal access token**, limited to the delivery
   repositories: Contents read/write and Pull requests read/write. It's stored
-  in 1Password (`op://agents/cycle-runner-github/token`) and referenced only by
+  in 1Password (`op://agents/cycle-runner-github/credential`) and referenced only by
   `.env.github`.
 - **Only `deliver` gets it** (`op run --env-file .env.github -- …`). The bot's
   `.env` doesn't contain it.
