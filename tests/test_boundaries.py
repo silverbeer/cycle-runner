@@ -112,7 +112,7 @@ def test_only_approval_and_the_executor_can_reach_the_work_request_store():
         if path.name != "work_requests.py"
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
-    assert sorted(users) == ["approval.py", "executor.py", "issue_context.py", "projects.py"]
+    assert sorted(users) == ["approval.py", "executor.py", "git_delivery.py", "issue_context.py", "projects.py"]
 
 
 @pytest.mark.parametrize(
@@ -140,7 +140,8 @@ def test_the_agent_has_no_tool_that_touches_work_requests():
 
 
 @pytest.mark.parametrize(
-    "module", ["executor.py", "fake_executor.py", "work_requests.py", "claude_executor.py", "projects.py"]
+    "module", ["executor.py", "fake_executor.py", "work_requests.py", "claude_executor.py", "projects.py",
+               "git_delivery.py"]
 )
 def test_execution_modules_cannot_reach_adk_telegram_linear_or_the_conversation(module):
     imports = _imported_modules(PACKAGE / module)
@@ -167,7 +168,8 @@ def test_the_conversation_side_cannot_start_execution():
     users = [path.name for path in _modules() if "cycle_runner.executor" in _imported_modules(path)]
     # The executors implement the interface and the resolver produces its
     # workspaces; nothing in the Telegram/ADK path imports it.
-    assert sorted(users) == ["claude_executor.py", "fake_executor.py", "issue_context.py", "projects.py"]
+    assert sorted(users) == ["claude_executor.py", "fake_executor.py", "git_delivery.py", "issue_context.py",
+                             "projects.py"]
 
 
 def test_importing_the_package_does_not_load_adk():
@@ -215,7 +217,7 @@ def _imported_modules_in(source: str) -> set[str]:
 def test_the_runner_does_not_know_about_claude_or_linear():
     imports = _runner_library_imports()
     forbidden = ("claude_agent_sdk", "cycle_runner.claude_executor", "cycle_runner.issue_context",
-                 "cycle_runner.linear_client")
+                 "cycle_runner.linear_client", "cycle_runner.git_delivery", "subprocess")
     assert not [n for n in imports if n.startswith(forbidden)], imports
 
 
@@ -275,3 +277,45 @@ def test_only_the_resolver_reads_project_configuration():
     users = [path.name for path in _modules() if "tomllib" in _imported_modules(path)]
     assert users == ["projects.py"]
 
+
+
+# --- V1.3: local git delivery ------------------------------------------------------
+
+GIT_OPERATIONS = {"rev-parse", "config", "remote", "status", "check-ref-format", "switch", "add", "diff",
+                  "commit", "diff-tree", "reset", "branch"}
+
+
+def _git_operations(module: str) -> set[str]:
+    """The first argument after the workspace of every self._git(root, ...) call."""
+    ops = set()
+    for node in ast.walk(ast.parse((PACKAGE / module).read_text())):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_git"
+                and len(node.args) >= 2):
+            first = node.args[1]
+            assert isinstance(first, (ast.Constant, ast.Starred)), ast.dump(first)
+            if isinstance(first, ast.Constant):
+                ops.add(first.value)
+    return ops
+
+
+def test_delivery_uses_only_a_fixed_set_of_git_operations():
+    assert _git_operations("git_delivery.py") <= GIT_OPERATIONS
+    constants = {node.value for node in ast.walk(ast.parse((PACKAGE / "git_delivery.py").read_text()))
+                 if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    assert not constants & {"push", "fetch", "pull", "clone", "--force", "--mirror", "ls-remote", "send-email"}
+
+
+def test_only_projects_and_delivery_start_processes():
+    users = [path.name for path in _modules() if "subprocess" in _imported_modules(path)]
+    assert sorted(users) == ["git_delivery.py", "projects.py"]
+
+
+def test_delivery_knows_nothing_about_claude_linear_or_the_conversation():
+    imports = _imported_modules(PACKAGE / "git_delivery.py")
+    assert imports == {"logging", "os", "re", "subprocess", "pathlib", "typing", "cycle_runner.executor",
+                       "cycle_runner.work_requests"}
+
+
+def test_the_claude_executor_cannot_deliver():
+    imports = _imported_modules(PACKAGE / "claude_executor.py")
+    assert "cycle_runner.git_delivery" not in imports and "subprocess" not in imports

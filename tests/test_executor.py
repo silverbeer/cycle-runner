@@ -45,7 +45,7 @@ class Spy:
 
     name = "spy"
 
-    def __init__(self, outcome="completed", error=None):
+    def __init__(self, outcome="changed", error=None):
         self.received, self.workspaces = [], []
         self.outcome, self.error = outcome, error
 
@@ -174,7 +174,7 @@ def test_the_fake_executor_performs_no_external_operations(store, monkeypatch, f
 
     result = FakeExecutor().execute(task_from_approval(request), workspace)
 
-    assert result.outcome == "completed"
+    assert result.outcome == "no_change"  # it did nothing, successfully
 
 
 # --- crashes, with real processes ---------------------------------------------
@@ -293,7 +293,7 @@ def _cli(*args):
 def test_cli_run_completes_the_next_request(store, capsys, projects_config):
     wr = _approve(store)
     assert _cli("run") == 0
-    assert f"{wr} SB-640 completed by fake@" in capsys.readouterr().out
+    assert f"{wr} SB-640 completed (no_change) by fake@" in capsys.readouterr().out
 
 
 def test_cli_with_nothing_pending(store, capsys, projects_config):
@@ -365,11 +365,12 @@ def test_the_runs_details_are_kept_beside_the_workspace(store, tmp_path):
 
     class Detailed(Spy):
         def execute(self, task, workspace):
-            return ExecutionResult(outcome="completed", message="done", details={"cost_usd": 0.5})
+            return ExecutionResult(outcome="changed", message="done", details={"cost_usd": 0.5})
 
     run_next(store, Detailed(), type("R", (), {"resolve": lambda self, r: workspace})())
 
     record = json.loads(details_path(workspace).read_text())
     assert details_path(workspace) == tmp_path / "workspaces" / "WR-000001.json"  # not inside the clone
-    assert record == {"work_request_id": wr, "issue_id": "SB-640", "outcome": "completed", "message": "done",
-                      "details": {"cost_usd": 0.5}}
+    assert record == {"work_request_id": wr, "issue_id": "SB-640", "outcome": "changed", "message": "done",
+                      "files_changed": [], "details": {"cost_usd": 0.5}, "workspace": str(workspace.path),
+                      "delivery": None}

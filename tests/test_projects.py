@@ -184,7 +184,7 @@ class Spy:
         from cycle_runner.executor import ExecutionResult
 
         self.calls.append((task.work_request_id, workspace))
-        return ExecutionResult(outcome="completed", message="spy")
+        return ExecutionResult(outcome="changed", message="spy")
 
 
 def test_the_runner_hands_the_executor_the_resolved_workspace(tmp_path, store):

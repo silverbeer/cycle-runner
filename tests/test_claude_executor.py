@@ -50,17 +50,20 @@ def _request(store, title="Add a greet(name) function to src/hello.py", issue_id
     return request
 
 
+SUMMARY = "Added greet(name) to src/hello.py and a unit test for it; all tests pass."
+
+
 def _result(**overrides):
     fields = dict(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=4,
                   session_id="s", total_cost_usd=0.03, permission_denials=[],
-                  structured_output={"outcome": "completed", "summary": "Added greet().",
+                  structured_output={"outcome": "completed", "summary": SUMMARY,
                                      "tests_passed": True, "tests_command": "python -m unittest"})
     return ResultMessage(**{**fields, **overrides})
 
 
 def _result_for(workspace, **report):
     """A successful result whose report names this workspace's test command, as a real one does."""
-    return _result(structured_output={"outcome": "completed", "summary": "Added greet().", "tests_passed": True,
+    return _result(structured_output={"outcome": "completed", "summary": SUMMARY, "tests_passed": True,
                                       "tests_command": workspace.test_command, **report})
 
 
@@ -267,8 +270,8 @@ def test_a_task_without_a_description_has_no_issue_section(workspace, work_reque
 def test_success_needs_a_clean_run_passing_tests_and_a_change():
     result = to_execution_result(_result(), ["src/hello.py", "tests/test_hello.py"])
 
-    assert result.outcome == "completed"
-    assert result.message == "Added greet(). (tests passed; changed src/hello.py, tests/test_hello.py)"
+    assert result.outcome == "changed"
+    assert result.message == f"{SUMMARY} (tests passed; changed src/hello.py, tests/test_hello.py)"
     assert result.details["files_changed"] == ["src/hello.py", "tests/test_hello.py"]
     assert result.details["cost_usd"] == 0.03
 
@@ -284,7 +287,7 @@ def test_success_needs_a_clean_run_passing_tests_and_a_change():
                                     "tests_command": "x"}), ["a"], "reports failure: Can't do it."),
         (_result(structured_output={"outcome": "completed", "summary": "Done.", "tests_passed": False,
                                     "tests_command": "x"}), ["a"], "reports failure: Done."),
-        (_result(), [], "No change made. The coding agent reports: Added greet()."),
+
     ],
 )
 def test_anything_less_is_a_failure(message, files, expected):
@@ -322,7 +325,7 @@ def test_execute_reports_what_the_agent_changed(workspace, work_request_db, monk
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
-    assert result.outcome == "completed"
+    assert result.outcome == "changed"
     assert result.details["files_changed"] == ["src/hello.py"]
     assert result.details["tests_observed"] == 1 and result.details["tests_output_tail"].endswith("OK")
     assert seen["cwd"] == workspace.path.resolve()
@@ -358,7 +361,7 @@ def test_the_runner_owns_the_lifecycle_around_the_claude_executor(workspace, wor
 
     assert executed and done.status == "completed"
     assert done.claimed_by.startswith("claude-code@")
-    assert done.result_message.startswith("Added greet(). (tests passed")
+    assert done.result_message.startswith(f"{SUMMARY} (tests passed")
     assert done.result_message.endswith(f"[workspace: {workspace.path}]")  # where to inspect the work
     again, executed_again = run_request(store, ClaudeCodeExecutor(), resolver, request.work_request_id)
     assert executed_again is False and again.status == "completed"
@@ -432,7 +435,7 @@ def test_the_observed_test_runs(workspace, messages, pattern, problem):
     verdict = transcript.verdict(pattern)
     assert verdict is None if problem is None else problem in verdict
     result = to_execution_result(_result_for(workspace), ["src/hello.py"], transcript, pattern)
-    assert result.outcome == ("completed" if problem is None else "failed")
+    assert result.outcome == ("changed" if problem is None else "failed")
 
 
 def test_tool_output_in_parts_is_read_as_text(workspace):
@@ -460,7 +463,7 @@ def test_test_byproducts_are_not_the_agents_changes(workspace, work_request_db, 
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
-    assert result.outcome == "failed" and result.message.startswith("No change made.")
+    assert result.outcome == "no_change" and result.message == f"No change was required. {SUMMARY}"
     assert result.details["files_changed"] == [] and result.details["other_new_files"] == 2
 
 
@@ -478,7 +481,7 @@ def test_new_files_the_agent_wrote_and_edits_to_existing_files_count(workspace, 
 
     result = ClaudeCodeExecutor().execute(task_from_approval(request), workspace)
 
-    assert result.outcome == "completed", result.message
+    assert result.outcome == "changed", result.message
     assert result.details["files_changed"] == ["src/hello.py", "tests/test_greet.py"]
     assert result.details["other_new_files"] == 1
 
@@ -500,7 +503,7 @@ def test_a_placeholder_report_is_not_accepted(workspace):
                                  transcript)
 
     assert result.outcome == "failed"
-    assert result.message == "The coding agent's report doesn't describe this run (it names `pytest`): test"
+    assert result.message.startswith("The coding agent's report can't be used: its summary is a placeholder ('test')")
     assert result.details["report_attempts"] == 2
 
 
@@ -522,3 +525,73 @@ def test_the_agents_state_is_kept_beside_the_workspace_not_under_the_home_direct
     state = workspace.path.with_name(workspace.path.name + ".claude")
     assert seen["env"]["CLAUDE_CONFIG_DIR"] == str(state.resolve())
     assert state.is_dir() and oct(state.stat().st_mode & 0o777) == "0o700"
+
+
+# --- V1.3: outcomes and meaningful reports -------------------------------------------
+
+SB_640_SUMMARY = (
+    "Rate limiting and the password policy (items 3 and 4) are already implemented and tested on main; "
+    "no code change needed. Items 1 and 2 are production operations left for a human."
+)
+
+
+def test_sb_640_regression_verified_work_with_no_change_is_no_change_not_failure(workspace):
+    # V1.2's live WR-000001: the agent read the issue, ran the tests (passing) and
+    # changed nothing, because the work was already on main. It reported "completed".
+    transcript = _observed(workspace, _tool_call("r", "Read", file_path="src/hello.py"), *_test_run(workspace))
+
+    result = to_execution_result(_result_for(workspace, summary=SB_640_SUMMARY), [], transcript)
+
+    assert result.outcome == "no_change"
+    assert result.message == f"No change was required. {SB_640_SUMMARY}"
+    assert result.files_changed == []
+
+
+def test_an_agent_reporting_no_change_with_verified_tests_is_no_change(workspace):
+    transcript = _observed(workspace, *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, outcome="no_change", summary=SB_640_SUMMARY), [], transcript)
+    assert result.outcome == "no_change"
+
+
+def test_no_change_still_needs_the_tests_to_have_run(workspace):
+    # "Nothing to do" is a claim like any other: without an observed passing run it's a failure.
+    result = to_execution_result(_result_for(workspace, summary=SB_640_SUMMARY), [], _observed(workspace))
+    assert result.outcome == "failed" and "the tests were never run" in result.message
+
+
+def test_an_agent_claiming_no_change_while_files_changed_fails(workspace):
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, outcome="no_change", summary=SB_640_SUMMARY),
+                                 ["src/hello.py"], transcript)
+    assert result.outcome == "failed" and "reports no change, but changed src/hello.py" in result.message
+
+
+def test_a_changed_result_carries_the_executors_own_file_list(workspace):
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace), ["src/hello.py"], transcript)
+    assert (result.outcome, result.files_changed) == ("changed", ["src/hello.py"])
+
+
+@pytest.mark.parametrize(
+    ("summary", "problem"),
+    [
+        ("test", "a placeholder"),
+        ("  TODO ", "a placeholder"),
+        ("Done.", "a placeholder"),
+        ("n/a", "a placeholder"),
+        ("No changes", "a placeholder"),
+        ("lorem ipsum dolor sit amet, consectetur adipiscing", "a placeholder"),
+        ("Fixed it.", "too short"),
+        ("Added the function and tests", "too short"),  # 5 words
+        ("x" * 60, "a placeholder"),
+        ("Everything is fine here now.", "too short"),
+    ],
+)
+@pytest.mark.parametrize("files", [["src/hello.py"], []])
+def test_a_meaningless_report_is_never_a_success(workspace, summary, problem, files):
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+
+    result = to_execution_result(_result_for(workspace, summary=summary), files, transcript)
+
+    assert result.outcome == "failed"  # neither changed nor no_change
+    assert result.message.startswith("The coding agent's report can't be used:") and problem in result.message
