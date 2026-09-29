@@ -6,6 +6,9 @@
     uv run python -m cycle_runner.executor abandon WR-000001 --reason "..."
     uv run python -m cycle_runner.executor backfill-project WR-000001 MT
     uv run python -m cycle_runner.executor review WR-000002    # what a run left for a human to inspect
+    uv run python -m cycle_runner.executor approve WR-000002 --commit 1a2b3c4   # that exact commit, for GitHub
+    uv run python -m cycle_runner.executor reject WR-000002 --commit 1a2b3c4 --reason "..."
+    op run --env-file .env.github -- uv run python -m cycle_runner.executor deliver WR-000002  # push + draft PR
 
     # a real coding agent, on one named request (reads the issue from Linear):
     op run --env-file .env -- uv run python -m cycle_runner.executor run \
@@ -36,6 +39,7 @@ An exception from the executor isn't a crash: it's recorded as failed.
 """
 
 import argparse
+import getpass
 import json
 import logging
 import os
@@ -50,6 +54,8 @@ from pydantic import BaseModel, Field
 from cycle_runner.work_requests import InvalidTransition, Outcome, WorkRequest, WorkRequestStore, open_store
 
 log = logging.getLogger(__name__)
+
+GITHUB_TOKEN_VARIABLE = "CYCLE_RUNNER_GITHUB_TOKEN"  # only the deliver command may have it
 
 
 class ExecutionResult(BaseModel):
@@ -313,6 +319,16 @@ def main(argv: list[str] | None = None) -> int:
     backfill.add_argument("project_id")
     review = commands.add_parser("review", help="show what a finished run left for human review")
     review.add_argument("work_request_id")
+    approve = commands.add_parser("approve", help="approve one exact local commit for GitHub delivery")
+    approve.add_argument("work_request_id")
+    approve.add_argument("--commit", required=True, help="the SHA you reviewed (at least 7 characters)")
+    reject = commands.add_parser("reject", help="reject a local commit: it will never be delivered")
+    reject.add_argument("work_request_id")
+    reject.add_argument("--commit", required=True)
+    reject.add_argument("--reason", required=True)
+    deliver = commands.add_parser("deliver", help="push an approved commit and open a draft PR "
+                                                  f"(needs {GITHUB_TOKEN_VARIABLE})")
+    deliver.add_argument("work_request_id")
     args = parser.parse_args(argv)
 
     store = open_store()
@@ -331,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "review":
             return _review(store, args.work_request_id)
+        if args.command in ("approve", "reject", "deliver"):
+            return _decide(store, args)
         if args.command == "backfill-project":
             request = store.backfill_project(args.work_request_id, args.project_id)
             print(f"{_describe(request)} (project {request.project_id})")
@@ -352,6 +370,11 @@ def _run(store: WorkRequestStore, work_request_id: str | None, kind: str, max_tu
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if kind == "claude":
+        # The GitHub write credential never shares a process with the coding agent.
+        if os.environ.get(GITHUB_TOKEN_VARIABLE):
+            print(f"error: {GITHUB_TOKEN_VARIABLE} is set; run the coding agent without the GitHub credential",
+                  file=sys.stderr)
+            return 2
         # A real coding agent only ever runs on a request named deliberately.
         if not work_request_id:
             print("error: --executor claude needs --request WR-…", file=sys.stderr)
@@ -387,30 +410,27 @@ def _run(store: WorkRequestStore, work_request_id: str | None, kind: str, max_tu
 
 
 def _review(store: WorkRequestStore, work_request_id: str) -> int:
-    """The human review point: everything a finished run left, from the store and its record."""
+    """The human review point: the run, its local commit (verified again), and its delivery state."""
+    from cycle_runner.delivery_approval import ApprovalRefused, review
     from cycle_runner.projects import ProjectConfigError, load_projects
 
-    request = store.get(work_request_id)
-    if request is None:
-        raise InvalidTransition(f"{work_request_id} does not exist")
+    try:
+        config = load_projects()
+        current = review(store, config, work_request_id)
+    except (ProjectConfigError, ApprovalRefused) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    request, record = current.request, current.record
     print(_describe(request))
     if request.status not in ("completed", "failed"):
         return 0
-    try:
-        workspace = load_projects().workspace_root / request.work_request_id
-    except ProjectConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    record_path = details_path(ExecutionWorkspace(path=workspace, test_command=""))
-    try:
-        record = json.loads(record_path.read_text())
-    except (OSError, ValueError):
-        print(f"workspace: {workspace} (no run record at {record_path})")
-        return 0
     details, delivery = record.get("details", {}), record.get("delivery")
-    print(f"outcome:   {record.get('outcome')}")
-    print(f"workspace: {workspace}")
-    print(f"record:    {record_path}")
+    print(f"issue:     {request.issue_id} ({request.title_at_approval})")
+    print(f"project:   {request.project_id}"
+          + (f" -> GitHub {current.project.github}" if current.project and current.project.github else ""))
+    print(f"outcome:   {record.get('outcome', request.outcome)}")
+    print(f"workspace: {current.workspace}" + ("" if current.workspace.exists() else " (missing)"))
+    print(f"record:    {details_path(ExecutionWorkspace(path=current.workspace, test_command=''))}")
     tail = (details.get("tests_output_tail") or "").strip().splitlines()
     tests = next((line for line in reversed(tail) if " passed" in line or " failed" in line or line == "OK"), None)
     print(f"tests:     {details.get('tests_observed', 0)} observed run(s); last: {tests or 'n/a'}")
@@ -424,10 +444,55 @@ def _review(store: WorkRequestStore, work_request_id: str) -> int:
         for item in left[:10]:
             print(f"  not committed: {item}")
         if len(left) > 10:
-            print(f"  not committed: {len(left) - 10} more (all listed in {record_path.name})")
-        print(f"inspect:   git -C {workspace} show --stat {delivery['commit'][:12]}")
-        print("review:    pending. Nothing has been pushed; no PR exists.")
+            print(f"  not committed: {len(left) - 10} more (all listed in the record)")
+        print(f"inspect:   git -C {current.workspace} show --stat {delivery['commit'][:12]}")
+    print(f"verified:  {'ok, the local commit matches its record' if current.verified else current.problem}")
+    for approval in current.approvals:
+        extra = approval.pr_url or approval.reason or approval.last_error or ""
+        print(f"approval:  {approval.approval_id} {approval.status} for {approval.commit_sha[:12]} "
+              f"by {approval.approved_by}" + (f" - {extra}" if extra else ""))
+    state = current.state
+    print(f"delivery:  {state}")
+    if state == "review_pending":
+        if current.verified:
+            print(f"review:    pending. Nothing has been pushed; no PR exists. To approve this exact commit:\n"
+                  f"           approve {work_request_id} --commit {current.verified.commit_sha[:12]}")
+        else:
+            print("review:    pending. Nothing has been pushed; no PR exists. Can't be approved as it stands.")
     return 0
+
+
+def _decide(store: WorkRequestStore, args) -> int:
+    """approve, reject and deliver: each a deliberate command about one work request."""
+    from cycle_runner.delivery_approval import ApprovalRefused, approve, reject
+    from cycle_runner.projects import ProjectConfigError, load_projects
+
+    who = f"cli:{getpass.getuser()}@{socket.gethostname()}"
+    try:
+        config = load_projects()
+        if args.command == "approve":
+            approval = approve(store, config, args.work_request_id, commit=args.commit, approved_by=who)
+            print(f"{approval.approval_id} approved {approval.commit_sha} ({approval.branch}) for "
+                  f"{approval.repository}. Nothing pushed yet; run deliver {args.work_request_id}.")
+            return 0
+        if args.command == "reject":
+            approval = reject(store, args.work_request_id, commit=args.commit, rejected_by=who, reason=args.reason)
+            print(f"{approval.approval_id} rejected {approval.commit_sha}: {approval.reason}")
+            return 0
+        from cycle_runner.github_delivery import GitHubDelivery, GitHubDeliveryError
+
+        try:
+            approval = GitHubDelivery(store, config, token=os.environ.get(GITHUB_TOKEN_VARIABLE, "")).deliver(
+                args.work_request_id)
+        except GitHubDeliveryError as exc:
+            print(f"error: delivery failed at {exc}", file=sys.stderr)
+            return 1
+        print(f"{approval.approval_id} {approval.status}: {approval.commit_sha[:12]} on "
+              f"{approval.repository}:{approval.branch}, draft PR {approval.pr_url}")
+        return 0
+    except (ProjectConfigError, ApprovalRefused) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def _describe(request: WorkRequest) -> str:

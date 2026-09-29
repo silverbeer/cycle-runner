@@ -25,6 +25,7 @@ This is the only module that knows the store is SQLite. It knows nothing
 about ADK, Telegram, Linear or executors.
 """
 
+import json
 import os
 import re
 import sqlite3
@@ -32,12 +33,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 DEFAULT_DB_PATH = "data/cycle-runner.db"
-SCHEMA_VERSION = 4  # 0/1: V0.8 (pending only). 2: V0.9 lifecycle. 3: V1.1 project_id. 4: V1.3 outcome, delivery.
+SCHEMA_VERSION = 5  # 0/1: V0.8 (pending only). 2: V0.9 lifecycle. 3: V1.1 project_id. 4: V1.3 outcome, delivery.
+# 5: V1.4 delivery_approvals.
 
 Status = Literal["pending", "claimed", "running", "completed", "failed"]
 STATUSES = ("pending", "claimed", "running", "completed", "failed")
@@ -124,6 +126,97 @@ V08_COLUMNS = (
 )
 
 WORK_REQUEST_ID = re.compile(r"^WR-(\d{6,})$")
+APPROVAL_ID = re.compile(r"^APR-(\d{6,})$")
+COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+# --- delivery approvals (V1.4) ------------------------------------------------------
+#
+# A human's explicit approval of one exact local commit for GitHub delivery. It
+# is a separate record from the work request: the work request says whether the
+# engineering work succeeded; this says what a person allowed out, and how far
+# its delivery got. A failed push never makes the work request fail.
+#
+#   approved ──push──► pushed ──draft PR──► pr_created
+#       │                 │
+#       └──── invalid ◄───┘   the local commit no longer matches: approve again
+#   rejected                  a human said no (terminal)
+#
+# What was approved (work request, commit, branch, base, project, repository,
+# evidence, who, when) can never change: the database refuses it. A new commit
+# needs a new approval; an approval never moves to another commit.
+ApprovalStatus = Literal["approved", "pushed", "pr_created", "rejected", "invalid"]
+APPROVAL_STATUSES = ("approved", "pushed", "pr_created", "rejected", "invalid")
+LIVE_APPROVAL_STATUSES = ("approved", "pushed", "pr_created")
+APPROVAL_TRANSITIONS = {("approved", "pushed"), ("pushed", "pr_created"), ("approved", "invalid"), ("pushed", "invalid")}
+IMMUTABLE_APPROVAL_COLUMNS = ("id", "work_request_id", "commit_sha", "branch", "base_sha", "project_id",
+                              "repository", "evidence", "approved_by", "approved_at")
+
+APPROVALS_TABLE = f"""
+CREATE TABLE IF NOT EXISTS delivery_approvals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,  -- shown as APR-000001; never reused
+    work_request_id TEXT NOT NULL,
+    commit_sha      TEXT NOT NULL CHECK (length(commit_sha) = 40 AND commit_sha NOT GLOB '*[^0-9a-f]*'),
+    branch          TEXT NOT NULL,
+    base_sha        TEXT NOT NULL,                      -- the approved commit's only parent
+    project_id      TEXT NOT NULL,
+    repository      TEXT NOT NULL,                      -- GitHub owner/name, from projects.toml at approval
+    evidence        TEXT NOT NULL,                      -- JSON: files, diff, message, tests, as reviewed
+    approved_by     TEXT NOT NULL,
+    approved_at     TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN {APPROVAL_STATUSES}),
+    reason          TEXT,                               -- why rejected or invalid
+    last_error      TEXT,                               -- the latest delivery failure, if any
+    pushed_at       TEXT,
+    pr_number       INTEGER,
+    pr_url          TEXT,
+    updated_at      TEXT
+)
+"""
+APPROVAL_SCHEMA = (
+    APPROVALS_TABLE,
+    # At most one live approval per work request.
+    f"""CREATE UNIQUE INDEX IF NOT EXISTS one_live_approval_per_work_request
+        ON delivery_approvals (work_request_id) WHERE status IN {LIVE_APPROVAL_STATUSES}""",
+)
+APPROVAL_TRIGGERS = (
+    # Only a completed, changed work request's own recorded commit can be approved.
+    """
+    CREATE TRIGGER delivery_approval_only_for_a_delivered_change
+    BEFORE INSERT ON delivery_approvals
+    WHEN NEW.status IN ('approved', 'rejected') AND NOT EXISTS (
+        SELECT 1 FROM work_requests
+        WHERE 'WR-' || printf('%06d', id) = NEW.work_request_id
+          AND status = 'completed' AND outcome = 'changed'
+          AND commit_sha = NEW.commit_sha AND branch = NEW.branch
+    ) OR NEW.status NOT IN ('approved', 'rejected')
+    BEGIN
+        SELECT RAISE(ABORT, 'not an approvable delivery');
+    END
+    """,
+    """
+    CREATE TRIGGER delivery_approval_is_immutable
+    BEFORE UPDATE ON delivery_approvals
+    WHEN {changed}
+    BEGIN
+        SELECT RAISE(ABORT, 'an approval can never change what it approved');
+    END
+    """.format(changed=" OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in IMMUTABLE_APPROVAL_COLUMNS)),
+    """
+    CREATE TRIGGER delivery_approval_transitions
+    BEFORE UPDATE OF status ON delivery_approvals
+    WHEN NEW.status <> OLD.status AND OLD.status || '->' || NEW.status NOT IN ({allowed})
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid approval transition');
+    END
+    """.format(allowed=", ".join(f"'{a}->{b}'" for a, b in sorted(APPROVAL_TRANSITIONS))),
+    """
+    CREATE TRIGGER delivery_approval_is_kept
+    BEFORE DELETE ON delivery_approvals
+    BEGIN
+        SELECT RAISE(ABORT, 'approvals are never deleted');
+    END
+    """,
+)
 
 
 class WorkRequest(BaseModel):
@@ -145,6 +238,26 @@ class WorkRequest(BaseModel):
     outcome: Outcome | None = None
     branch: str | None = None
     commit_sha: str | None = None
+
+
+class DeliveryApproval(BaseModel):
+    approval_id: str
+    work_request_id: str
+    commit_sha: str
+    branch: str
+    base_sha: str
+    project_id: str
+    repository: str
+    evidence: dict[str, Any]
+    approved_by: str
+    approved_at: datetime
+    status: ApprovalStatus
+    reason: str | None = None
+    last_error: str | None = None
+    pushed_at: datetime | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    updated_at: datetime | None = None
 
 
 class InvalidTransition(Exception):
@@ -221,6 +334,14 @@ class WorkRequestStore:
             db.execute("DROP TRIGGER IF EXISTS work_request_starts_pending")
             db.execute("DROP TRIGGER IF EXISTS work_request_outcome_matches_status")
             for trigger in TRIGGERS:  # one at a time: executescript would commit mid-migration
+                db.execute(trigger)
+            # V1.4: delivery approvals, and their rules.
+            for statement in APPROVAL_SCHEMA:
+                db.execute(statement)
+            for name in ("delivery_approval_only_for_a_delivered_change", "delivery_approval_is_immutable",
+                         "delivery_approval_transitions", "delivery_approval_is_kept"):
+                db.execute(f"DROP TRIGGER IF EXISTS {name}")
+            for trigger in APPROVAL_TRIGGERS:
                 db.execute(trigger)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             db.execute("COMMIT")
@@ -385,6 +506,124 @@ class WorkRequestStore:
             raise InvalidTransition(f"{work_request_id} is {state}, not {from_status}")
         return _work_request(row)
 
+    # --- delivery approvals (V1.4) ------------------------------------------------
+
+    def approve_delivery(self, work_request_id: str, *, commit_sha: str, base_sha: str, repository: str,
+                         evidence: dict[str, Any], approved_by: str) -> DeliveryApproval:
+        """Record a human's approval of this exact commit. The caller has verified the commit.
+
+        Refused (InvalidTransition) unless the request completed with a changed
+        outcome and this is its recorded commit, and it has no live approval.
+        """
+        request = self.get(work_request_id)
+        if request is None:
+            raise InvalidTransition(f"{work_request_id} does not exist")
+        if not COMMIT_SHA.match(commit_sha) or not COMMIT_SHA.match(base_sha):
+            raise InvalidTransition("commit ids must be full 40-character SHAs")
+        if (request.status, request.outcome) != ("completed", "changed") or not request.commit_sha:
+            raise InvalidTransition(
+                f"{work_request_id} is {request.status} ({request.outcome}); only a changed, committed request "
+                "can be approved for delivery"
+            )
+        if request.commit_sha != commit_sha:
+            raise InvalidTransition(f"{work_request_id}'s commit is {request.commit_sha}, not {commit_sha}")
+        live = self.live_approval(work_request_id)
+        if live:
+            raise InvalidTransition(f"{work_request_id} already has {live.approval_id} ({live.status})")
+        try:
+            with self._connect() as db:
+                row = db.execute(
+                    """
+                    INSERT INTO delivery_approvals (work_request_id, commit_sha, branch, base_sha, project_id,
+                        repository, evidence, approved_by, approved_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved') RETURNING *
+                    """,
+                    (work_request_id, commit_sha, request.branch, base_sha, request.project_id, repository,
+                     json.dumps(evidence, sort_keys=True), approved_by, _now()),
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:  # raced with another approval, or not approvable
+            raise InvalidTransition(f"{work_request_id} can't be approved: {exc}") from None
+        return _approval(row)
+
+    def reject_delivery(self, work_request_id: str, *, commit_sha: str, rejected_by: str,
+                        reason: str) -> DeliveryApproval:
+        """A human's no for this commit: recorded, terminal, never delivered."""
+        request = self.get(work_request_id)
+        if request is None or request.commit_sha != commit_sha or request.outcome != "changed":
+            raise InvalidTransition(f"{work_request_id} has no commit {commit_sha} to reject")
+        live = self.live_approval(work_request_id)
+        if live:
+            raise InvalidTransition(f"{work_request_id} already has {live.approval_id} ({live.status})")
+        with self._connect() as db:
+            row = db.execute(
+                """
+                INSERT INTO delivery_approvals (work_request_id, commit_sha, branch, base_sha, project_id,
+                    repository, evidence, approved_by, approved_at, status, reason, updated_at)
+                VALUES (?, ?, ?, '', ?, '', '{}', ?, ?, 'rejected', ?, ?) RETURNING *
+                """,
+                (work_request_id, commit_sha, request.branch, request.project_id or "", rejected_by, _now(),
+                 reason, _now()),
+            ).fetchone()
+        return _approval(row)
+
+    def live_approval(self, work_request_id: str) -> DeliveryApproval | None:
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT * FROM delivery_approvals WHERE work_request_id = ? AND status IN {LIVE_APPROVAL_STATUSES}",
+                (work_request_id,),
+            ).fetchone()
+        return _approval(row) if row else None
+
+    def approvals_for(self, work_request_id: str) -> list[DeliveryApproval]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM delivery_approvals WHERE work_request_id = ? ORDER BY id",
+                              (work_request_id,)).fetchall()
+        return [_approval(row) for row in rows]
+
+    def mark_pushed(self, approval_id: str) -> DeliveryApproval:
+        return self._approval_transition(approval_id, "approved", "pushed", pushed_at=_now(), last_error=None)
+
+    def mark_pr_created(self, approval_id: str, *, pr_number: int, pr_url: str) -> DeliveryApproval:
+        return self._approval_transition(approval_id, "pushed", "pr_created", pr_number=pr_number, pr_url=pr_url,
+                                         last_error=None)
+
+    def invalidate_approval(self, approval_id: str, reason: str) -> DeliveryApproval:
+        """The approved commit no longer matches what is there: this approval is dead. Approve again."""
+        current = self.get_approval(approval_id)
+        if current is None or current.status not in ("approved", "pushed"):
+            raise InvalidTransition(f"{approval_id} can't be invalidated")
+        return self._approval_transition(approval_id, current.status, "invalid", reason=reason)
+
+    def record_delivery_error(self, approval_id: str, error: str) -> DeliveryApproval:
+        """A delivery attempt failed (auth, push, PR). The approval and the work request stay as they are."""
+        current = self.get_approval(approval_id)
+        if current is None:
+            raise InvalidTransition(f"{approval_id} does not exist")
+        return self._approval_transition(approval_id, current.status, current.status, last_error=error[:2000])
+
+    def get_approval(self, approval_id: str) -> DeliveryApproval | None:
+        match = APPROVAL_ID.match(approval_id)
+        if not match:
+            return None
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM delivery_approvals WHERE id = ?", (int(match[1]),)).fetchone()
+        return _approval(row) if row else None
+
+    def _approval_transition(self, approval_id: str, from_status: str, to_status: str, **fields) -> DeliveryApproval:
+        match = APPROVAL_ID.match(approval_id)
+        if not match:
+            raise InvalidTransition(f"{approval_id!r} is not an approval id")
+        assignments = ", ".join(["status = ?", "updated_at = ?"] + [f"{column} = ?" for column in fields])
+        with self._connect() as db:
+            row = db.execute(
+                f"UPDATE delivery_approvals SET {assignments} WHERE id = ? AND status = ? RETURNING *",
+                (to_status, _now(), *fields.values(), int(match[1]), from_status),
+            ).fetchone()
+        if row is None:
+            current = self.get_approval(approval_id)
+            raise InvalidTransition(f"{approval_id} is {current.status if current else 'unknown'}, not {from_status}")
+        return _approval(row)
+
     # --- reading ----------------------------------------------------------------
 
     def get(self, work_request_id: str) -> WorkRequest | None:
@@ -410,6 +649,12 @@ def _row_id(work_request_id: str) -> int:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _approval(row: sqlite3.Row) -> DeliveryApproval:
+    fields = dict(row)
+    fields["evidence"] = json.loads(fields["evidence"])
+    return DeliveryApproval(approval_id=f"APR-{fields.pop('id'):06d}", **fields)
 
 
 def _work_request(row: sqlite3.Row) -> WorkRequest:

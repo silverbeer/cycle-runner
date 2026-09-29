@@ -343,7 +343,7 @@ def test_a_v09_database_is_migrated_to_v11(tmp_path):
     (request,) = store.list_all()
     assert (request.work_request_id, request.status, request.project_id) == ("WR-000001", "pending", None)
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
     store.claim("WR-000001", "x")
     assert store.fail_to_start("WR-000001", "no project").status == "failed"  # the new trigger rule applies
 
@@ -462,6 +462,6 @@ def test_a_v11_database_is_migrated_to_v13_and_keeps_its_rows(tmp_path):
     with sqlite3.connect(store.path) as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(work_requests)")}
         assert {"project_id", "outcome", "branch", "commit_sha"} <= columns
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     WorkRequestStore(store.path)  # opening again changes nothing
     assert store.list_all() == [request]

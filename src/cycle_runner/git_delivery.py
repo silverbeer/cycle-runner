@@ -34,6 +34,8 @@ checks that before and after.
 
 import logging
 import os
+from contextlib import contextmanager
+from dataclasses import dataclass
 import re
 import subprocess
 import tempfile
@@ -136,6 +138,29 @@ def protected_reason(path: str) -> str | None:
     return None
 
 
+def _diff_summary(name_status: str, numstat: str) -> dict[str, Any]:
+    """files changed/added/deleted, insertions and deletions, from git's -z output."""
+    statuses = name_status.split("\0")
+    kinds = dict(zip(statuses[1::2], statuses[0::2]))
+    files = []
+    for line in filter(None, numstat.split("\0")):
+        insertions, deletions, path = line.split("\t", 2)
+        files.append({
+            "path": path,
+            "status": {"A": "added", "D": "deleted"}.get(kinds.get(path, "M"), "modified"),
+            "insertions": int(insertions) if insertions.isdigit() else 0,
+            "deletions": int(deletions) if deletions.isdigit() else 0,
+        })
+    return {
+        "files": files,
+        "files_changed": sorted(f["path"] for f in files if f["status"] == "modified"),
+        "files_added": sorted(f["path"] for f in files if f["status"] == "added"),
+        "files_deleted": sorted(f["path"] for f in files if f["status"] == "deleted"),
+        "insertions": sum(f["insertions"] for f in files),
+        "deletions": sum(f["deletions"] for f in files),
+    }
+
+
 class LocalGitDelivery:
     """Commits a changed result on a new local branch in the workspace clone."""
 
@@ -149,13 +174,19 @@ class LocalGitDelivery:
 
     def deliver(self, request: WorkRequest, workspace: ExecutionWorkspace, result: ExecutionResult) -> Delivery:
         """Any failure, of any kind, is a DeliveryError with the workspace put back as it was."""
+        with self._session():
+            return self._deliver(request, workspace, result)
+
+    @contextmanager
+    def _session(self):
+        """Where git may run: an empty temporary HOME, and every error a DeliveryError."""
         with tempfile.TemporaryDirectory(prefix="cycle-runner-git-") as home:
             # An empty HOME and XDG_CONFIG_HOME: found in review, git reads
             # $HOME/.config/git/attributes and .../ignore even with the global
             # config off, and HOME must not be anywhere the agent could write.
             self._home = home
             try:
-                return self._deliver(request, workspace, result)
+                yield
             except DeliveryError:
                 raise
             except Exception as exc:  # a timeout, git missing, an unreadable file, ...
@@ -276,25 +307,19 @@ class LocalGitDelivery:
 
     def _staged_diff(self, root: Path) -> dict[str, Any]:
         """Machine-readable summary of what is about to be committed, from git itself."""
-        statuses = self._git(root, "diff", "--cached", "--name-status", "-z", "--no-renames").stdout.split("\0")
-        kinds = dict(zip(statuses[1::2], statuses[0::2]))
-        files = []
-        for line in filter(None, self._git(root, "diff", "--cached", "--numstat", "-z", "--no-renames").stdout.split("\0")):
-            insertions, deletions, path = line.split("\t", 2)
-            files.append({
-                "path": path,
-                "status": {"A": "added", "D": "deleted"}.get(kinds.get(path, "M"), "modified"),
-                "insertions": int(insertions) if insertions.isdigit() else 0,
-                "deletions": int(deletions) if deletions.isdigit() else 0,
-            })
-        return {
-            "files": files,
-            "files_changed": sorted(f["path"] for f in files if f["status"] == "modified"),
-            "files_added": sorted(f["path"] for f in files if f["status"] == "added"),
-            "files_deleted": sorted(f["path"] for f in files if f["status"] == "deleted"),
-            "insertions": sum(f["insertions"] for f in files),
-            "deletions": sum(f["deletions"] for f in files),
-        }
+        return _diff_summary(
+            self._git(root, "diff", "--cached", "--name-status", "-z", "--no-renames").stdout,
+            self._git(root, "diff", "--cached", "--numstat", "-z", "--no-renames").stdout,
+        )
+
+    def _commit_diff(self, root: Path, commit: str) -> dict[str, Any]:
+        """The same summary for a commit against its parent."""
+        return _diff_summary(
+            self._git(root, "diff-tree", "-r", "--no-commit-id", "--name-status", "-z", "--no-renames",
+                      f"{commit}^", commit).stdout,
+            self._git(root, "diff-tree", "-r", "--no-commit-id", "--numstat", "-z", "--no-renames",
+                      f"{commit}^", commit).stdout,
+        )
 
     def _undo(self, root: Path, base: str, original: str, branch: str) -> None:
         """Back to where delivery started: no commit, nothing staged, the original branch, no
@@ -309,17 +334,19 @@ class LocalGitDelivery:
     # --- the one way git is run ---------------------------------------------------
 
     def _git(self, root: Path, *args: str, input: str | None = None, check: bool = True,
-             binary: bool = False) -> subprocess.CompletedProcess:
+             binary: bool = False, extra_env: dict[str, str] | None = None,
+             extra_config: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
         if self._home is None:
-            raise DeliveryError("git runs only inside deliver()")
+            raise DeliveryError("git runs only inside a delivery session")
         env = {
             "PATH": self._path, "HOME": self._home, "XDG_CONFIG_HOME": self._home, "LC_ALL": "C",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
             "GIT_LITERAL_PATHSPECS": "1", "GIT_OPTIONAL_LOCKS": "0", "GIT_EDITOR": "true",
             "GIT_AUTHOR_NAME": AUTHOR_NAME, "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
             "GIT_COMMITTER_NAME": AUTHOR_NAME, "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
+            **(extra_env or {}),
         }
-        hardening = [item for setting in HARDENING for item in ("-c", setting)]
+        hardening = [item for setting in (*HARDENING, *extra_config) for item in ("-c", setting)]
         result = subprocess.run(
             ["git", *hardening, "-C", str(root), *args], env=env, input=input,
             capture_output=True, text=not binary, timeout=GIT_TIMEOUT_SECONDS,
@@ -329,3 +356,88 @@ class LocalGitDelivery:
             detail = (stderr.strip().splitlines() or ["no output"])[-1]
             raise DeliveryError(f"git {args[0]} failed: {detail}")
         return result
+
+
+# --- verifying a delivered commit (V1.4) ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VerifiedCommit:
+    """A local delivery commit, checked against its record: what a human approves."""
+
+    commit_sha: str
+    branch: str
+    base_sha: str
+    tree_sha: str
+    message: str
+    diff: dict[str, Any]
+
+
+class CommitVerifier(LocalGitDelivery):
+    """Checks that a work request's local delivery is still exactly what was recorded.
+
+    Used when a human approves (V1.4) and again right before anything is pushed.
+    Read-only: it never changes the workspace. Every check is independent of
+    the agent; any mismatch is a DeliveryError and nothing is approved or pushed.
+    """
+
+    def verify(self, workspace: Path, *, work_request_id: str, commit_sha: str, base_branch: str,
+               recorded_diff: dict[str, Any] | None) -> VerifiedCommit:
+        with self._session():
+            return self._verify(workspace, work_request_id, commit_sha, base_branch, recorded_diff)
+
+    def _verify(self, workspace: Path, work_request_id: str, commit_sha: str, base_branch: str,
+                recorded_diff: dict[str, Any] | None) -> VerifiedCommit:
+        branch = branch_name(work_request_id)
+        if not re.fullmatch(r"[0-9a-f]{40}", commit_sha or ""):
+            raise DeliveryError(f"{work_request_id} has no recorded commit")
+        if not workspace.is_dir():
+            raise DeliveryError(f"the workspace {workspace} no longer exists")
+        root = workspace.resolve()
+        git_dir = workspace / ".git"
+        if git_dir.is_symlink() or not git_dir.is_dir():
+            raise DeliveryError("the workspace's .git is not a plain directory")
+        self._audit(root)  # no remote, no unusual configuration
+        if self._git(root, "cat-file", "-t", commit_sha, check=False).stdout.strip() != "commit":
+            raise DeliveryError(f"the recorded commit {commit_sha[:12]} no longer exists in the workspace")
+        tip = self._git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}", check=False)
+        if tip.returncode != 0:
+            raise DeliveryError(f"the branch {branch} no longer exists")
+        if tip.stdout.strip() != commit_sha:
+            raise DeliveryError(f"{branch} is at {tip.stdout.strip()[:12]}, not the recorded {commit_sha[:12]}")
+        head_ref = self._git(root, "symbolic-ref", "--quiet", "HEAD", check=False).stdout.strip()
+        head = self._git(root, "rev-parse", "HEAD").stdout.strip()
+        if head_ref != f"refs/heads/{branch}" or head != commit_sha:
+            raise DeliveryError(f"HEAD is {head_ref or 'detached'} at {head[:12]}, not {branch} at {commit_sha[:12]}")
+        parents = self._git(root, "rev-list", "--parents", "-n", "1", commit_sha).stdout.split()[1:]
+        base = self._git(root, "rev-parse", "--verify", "--quiet", f"refs/heads/{base_branch}^{{commit}}",
+                         check=False).stdout.strip()
+        if len(parents) != 1 or not base or parents[0] != base:
+            raise DeliveryError(f"{commit_sha[:12]} isn't one commit on top of {base_branch} ({base[:12] or 'missing'})")
+        count = self._git(root, "rev-list", "--count", f"{base}..{branch}").stdout.strip()
+        if count != "1":
+            raise DeliveryError(f"{branch} has {count} commits on top of {base_branch}, not exactly one")
+        identity = self._git(root, "log", "-1", "--format=%an <%ae>%x00%cn <%ce>%x00%T", commit_sha).stdout
+        author, committer, tree = identity.strip().split("\0")
+        expected = f"{AUTHOR_NAME} <{AUTHOR_EMAIL}>"
+        if author != expected or committer != expected:
+            raise DeliveryError(f"{commit_sha[:12]} wasn't made by Cycle Runner ({author}; {committer})")
+        diff = self._commit_diff(root, commit_sha)
+        if recorded_diff is None or _files(diff) != _files(recorded_diff):
+            raise DeliveryError("the commit's files no longer match the recorded delivery")
+        for entry in diff["files"]:
+            reason = protected_reason(entry["path"])
+            if reason:
+                raise DeliveryError(f"the commit contains {entry['path']}: {reason}")
+            if entry["status"] != "deleted":
+                blob = self._git(root, "cat-file", "blob", f"{commit_sha}:{entry['path']}", binary=True).stdout
+                if len(blob) > MAX_FILE_BYTES or b"\0" in blob[:8192]:
+                    raise DeliveryError(f"the commit contains binary or oversized {entry['path']}")
+                self._check_content(entry["path"], blob)
+        message = self._git(root, "log", "-1", "--format=%B", commit_sha).stdout.strip()
+        return VerifiedCommit(commit_sha=commit_sha, branch=branch, base_sha=base, tree_sha=tree,
+                              message=message, diff=diff)
+
+
+def _files(diff: dict[str, Any]) -> list[tuple]:
+    return sorted((_nfc(f["path"]), f["status"], f["insertions"], f["deletions"]) for f in diff.get("files", []))
