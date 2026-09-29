@@ -590,7 +590,8 @@ def test_test_output_and_urls_cant_inject_into_the_pr_body(setup):
 def test_history_rewriting_in_the_workspace_refuses_approval(setup, tmp_path, oddity):
     git_dir = setup.workspace / ".git"
     if oddity == "replace":  # found in review: git showed one tree while another was pushed
-        other = git(setup.workspace, "commit-tree", "-p", f"{setup.sha}^", "-m", "benign",
+        other = git(setup.workspace, "-c", f"user.name={AUTHOR_NAME}", "-c", f"user.email={AUTHOR_EMAIL}",
+                    "commit-tree", "-p", f"{setup.sha}^", "-m", "benign",
                     git(setup.workspace, "rev-parse", f"{setup.sha}^^{{tree}}"))
         git(setup.workspace, "replace", setup.sha, other)
     elif oddity == "grafts":
