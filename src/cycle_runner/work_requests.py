@@ -37,10 +37,15 @@ from typing import Literal
 from pydantic import BaseModel
 
 DEFAULT_DB_PATH = "data/cycle-runner.db"
-SCHEMA_VERSION = 3  # 0/1: V0.8 (pending only). 2: V0.9 lifecycle. 3: V1.1 project_id.
+SCHEMA_VERSION = 4  # 0/1: V0.8 (pending only). 2: V0.9 lifecycle. 3: V1.1 project_id. 4: V1.3 outcome, delivery.
 
 Status = Literal["pending", "claimed", "running", "completed", "failed"]
 STATUSES = ("pending", "claimed", "running", "completed", "failed")
+# What a finished run produced (V1.3). status says where the request is in its
+# lifecycle; outcome says what came of it. completed = changed or no_change.
+Outcome = Literal["changed", "no_change", "failed"]
+OUTCOMES = ("changed", "no_change", "failed")
+STATUS_OF_OUTCOME = {"changed": "completed", "no_change": "completed", "failed": "failed"}
 TRANSITIONS = {
     ("pending", "claimed"),  # claim
     ("claimed", "running"),  # start
@@ -66,14 +71,28 @@ CREATE TABLE {{name}} (
     started_at        TEXT,
     finished_at       TEXT,
     result_message    TEXT,
-    project_id        TEXT                                -- Linear's repo label (MT, TRD, ...); NULL before V1.1
+    project_id        TEXT,                               -- Linear's repo label (MT, TRD, ...); NULL before V1.1
+    outcome           TEXT CHECK (outcome IN {OUTCOMES}), -- changed | no_change | failed; NULL before V1.3
+    branch            TEXT,                               -- local branch holding the change (changed only)
+    commit_sha        TEXT                                -- local commit on that branch (changed only)
 )
 """
 
 # Enforced by the database too, whoever writes (a bug, or a human with the
 # sqlite3 shell). The transition list is generated from TRANSITIONS, not
 # written twice.
-TRIGGERS = (
+TRIGGERS = (  # SQLite fires the last created first, so the transition check runs before the outcome check
+    """
+    CREATE TRIGGER IF NOT EXISTS work_request_outcome_matches_status
+    BEFORE UPDATE ON work_requests
+    WHEN NEW.outcome IS NOT NULL AND NOT (
+        (NEW.status = 'completed' AND NEW.outcome IN ('changed', 'no_change'))
+        OR (NEW.status = 'failed' AND NEW.outcome = 'failed')
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'outcome does not match status');
+    END
+    """,
     """
     CREATE TRIGGER IF NOT EXISTS work_request_transitions
     BEFORE UPDATE OF status ON work_requests
@@ -91,6 +110,13 @@ TRIGGERS = (
     END
     """,
 )
+# Columns added after V0.9, with how to add each to an older table.
+ADDED_COLUMNS = {
+    "project_id": "TEXT",
+    "outcome": f"TEXT CHECK (outcome IN {OUTCOMES})",
+    "branch": "TEXT",
+    "commit_sha": "TEXT",
+}
 
 V08_COLUMNS = (
     "id, recommendation_id, issue_id, status, approved_by, approved_at, "
@@ -116,6 +142,9 @@ class WorkRequest(BaseModel):
     finished_at: datetime | None = None
     result_message: str | None = None
     project_id: str | None = None
+    outcome: Outcome | None = None
+    branch: str | None = None
+    commit_sha: str | None = None
 
 
 class InvalidTransition(Exception):
@@ -180,13 +209,17 @@ class WorkRequestStore:
                         "UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'work_requests'",
                         (sequence[0],),
                     )
-            elif version < 3:
-                # V0.9 -> V1.1: a new nullable column; existing rows have no project.
-                db.execute("ALTER TABLE work_requests ADD COLUMN project_id TEXT")
+            # V0.9 -> V1.1 (project_id) -> V1.3 (outcome, branch, commit_sha): new
+            # nullable columns; existing rows keep NULL.
+            present = {row[1] for row in db.execute("PRAGMA table_info(work_requests)")}
+            for column, definition in ADDED_COLUMNS.items():
+                if column not in present:
+                    db.execute(f"ALTER TABLE work_requests ADD COLUMN {column} {definition}")
             # Recreate the triggers every time so they always match TRANSITIONS
             # (CREATE ... IF NOT EXISTS would keep an older version's rules).
             db.execute("DROP TRIGGER IF EXISTS work_request_transitions")
             db.execute("DROP TRIGGER IF EXISTS work_request_starts_pending")
+            db.execute("DROP TRIGGER IF EXISTS work_request_outcome_matches_status")
             for trigger in TRIGGERS:  # one at a time: executescript would commit mid-migration
                 db.execute(trigger)
             db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -277,9 +310,14 @@ class WorkRequestStore:
     def start(self, work_request_id: str) -> WorkRequest:
         return self._transition(work_request_id, "claimed", "running", started_at=_now())
 
-    def finish(self, work_request_id: str, outcome: Literal["completed", "failed"], message: str) -> WorkRequest:
+    def finish(self, work_request_id: str, outcome: Outcome, message: str, *,
+               branch: str | None = None, commit_sha: str | None = None) -> WorkRequest:
+        """Record what a run produced. changed and no_change complete the request; failed fails it."""
+        if (branch or commit_sha) and outcome != "changed":
+            raise ValueError("only a changed outcome has a branch or commit")
         return self._transition(
-            work_request_id, "running", outcome, finished_at=_now(), result_message=message
+            work_request_id, "running", STATUS_OF_OUTCOME[outcome], finished_at=_now(), result_message=message,
+            outcome=outcome, branch=branch, commit_sha=commit_sha,
         )
 
     def fail_to_start(self, work_request_id: str, reason: str) -> WorkRequest:
@@ -288,7 +326,8 @@ class WorkRequestStore:
         Nothing ran, so it isn't "running"; releasing it would only fail again.
         """
         return self._transition(
-            work_request_id, "claimed", "failed", finished_at=_now(), result_message=f"Not started: {reason}"
+            work_request_id, "claimed", "failed", finished_at=_now(), result_message=f"Not started: {reason}",
+            outcome="failed",
         )
 
     def release(self, work_request_id: str) -> WorkRequest:
@@ -298,7 +337,8 @@ class WorkRequestStore:
     def abandon(self, work_request_id: str, reason: str) -> WorkRequest:
         """Manual recovery of a stranded run: failed, for a human to look at. Never retried."""
         return self._transition(
-            work_request_id, "running", "failed", finished_at=_now(), result_message=f"Abandoned: {reason}"
+            work_request_id, "running", "failed", finished_at=_now(), result_message=f"Abandoned: {reason}",
+            outcome="failed",
         )
 
     # --- one-off repair (V1.2) ---------------------------------------------------

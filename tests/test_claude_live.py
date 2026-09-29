@@ -21,6 +21,7 @@ import pytest
 
 from cycle_runner.claude_executor import ClaudeCodeExecutor
 from cycle_runner.executor import run_request
+from cycle_runner.git_delivery import LocalGitDelivery
 from cycle_runner.work_requests import WorkRequestStore
 from conftest import FixedWorkspace
 from disposable_repo import changed_files, make_repo, run_tests
@@ -53,13 +54,22 @@ def test_the_agent_completes_a_small_task_through_the_real_lifecycle(tmp_path, w
     store = WorkRequestStore(work_request_db)
     wr = _pending(store, GREET_TASK)
 
-    done, executed = run_request(store, ClaudeCodeExecutor(max_budget_usd=1.0), FixedWorkspace(workspace), wr)
+    done, executed = run_request(store, ClaudeCodeExecutor(max_budget_usd=1.0), FixedWorkspace(workspace), wr,
+                                 deliverer=LocalGitDelivery())
 
-    assert executed and done.status == "completed", done.result_message
+    assert executed and (done.status, done.outcome) == ("completed", "changed"), done.result_message
     assert done.claimed_by.startswith("claude-code@")
+    # V1.3: Cycle Runner, not the agent, committed the change on a local branch.
+    git = lambda *args: subprocess.run(["git", "-C", str(workspace.path), *args], capture_output=True,
+                                       text=True).stdout
+    assert git("rev-parse", "--abbrev-ref", "HEAD").strip() == done.branch == f"cycle-runner/{wr}"
+    assert git("rev-parse", "HEAD").strip() == done.commit_sha
+    assert git("log", "-1", "--format=%an").strip() == "Cycle Runner"
+    assert git("remote") == ""
     # Check the work ourselves rather than trusting the agent's report.
-    changed = changed_files(workspace)
+    changed = git("show", "--name-only", "--format=", "HEAD").split()
     assert "src/hello.py" in changed and any(name.startswith("tests/") for name in changed), changed
+    assert not [name for name in changed if "__pycache__" in name or name.endswith(".json")], changed
     check = subprocess.run(
         [str(workspace.test_command.split()[0]), "-c", "from src.hello import greet; print(greet('Ada'))"],
         cwd=workspace.path, capture_output=True, text=True,
@@ -68,7 +78,7 @@ def test_the_agent_completes_a_small_task_through_the_real_lifecycle(tmp_path, w
     tests = run_tests(workspace)
     assert tests.returncode == 0, tests.stderr
     assert "test_shout" in tests.stderr  # the original test still runs and passes
-    assert subprocess.run(["git", "log", "--oneline"], cwd=workspace.path, capture_output=True, text=True).stdout.count("\n") == 1  # no commits
+    assert git("log", "--oneline").count("\n") == 2  # the clone's commit + Cycle Runner's, none by the agent
 
 
 def test_an_agent_that_runs_out_of_turns_is_a_clean_failure(tmp_path, work_request_db):

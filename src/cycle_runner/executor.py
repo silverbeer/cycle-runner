@@ -5,6 +5,7 @@
     uv run python -m cycle_runner.executor release WR-000001
     uv run python -m cycle_runner.executor abandon WR-000001 --reason "..."
     uv run python -m cycle_runner.executor backfill-project WR-000001 MT
+    uv run python -m cycle_runner.executor review WR-000002    # what a run left for a human to inspect
 
     # a real coding agent, on one named request (reads the issue from Linear):
     op run --env-file .env -- uv run python -m cycle_runner.executor run \
@@ -46,17 +47,45 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from cycle_runner.work_requests import InvalidTransition, WorkRequest, WorkRequestStore, open_store
+from cycle_runner.work_requests import InvalidTransition, Outcome, WorkRequest, WorkRequestStore, open_store
 
 log = logging.getLogger(__name__)
 
 
 class ExecutionResult(BaseModel):
-    outcome: Literal["completed", "failed"]
+    """What an execution produced.
+
+    changed:   the work was done and verified, and files changed.
+    no_change: the work was checked and verified, and nothing needed changing
+               (e.g. it was already done). A success, not a failure.
+    failed:    anything else, including a report that can't be trusted.
+    """
+
+    outcome: Outcome
     message: str  # human-readable; this is what the store records
-    # Anything structured the executor wants to report (files changed, cost, ...).
-    # Returned to the caller, not persisted yet.
+    # Workspace-relative files the executor itself saw change (not the agent's word).
+    files_changed: list[str] = Field(default_factory=list)
+    # Anything structured the executor wants to report (cost, tests, ...); written
+    # to WR-xxxxxx.json beside the workspace.
     details: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """A changed result, delivered locally: a branch and a commit in the workspace."""
+
+    branch: str
+    commit_sha: str
+    diff: dict[str, Any]  # files changed/added/deleted, insertions, deletions
+    left_uncommitted: tuple[str, ...] = ()  # what was in the workspace but not committed, and why
+
+
+class DeliveryError(Exception):
+    """A changed result couldn't be delivered safely; nothing was committed."""
+
+
+class Deliverer(Protocol):
+    def deliver(self, request: WorkRequest, workspace: ExecutionWorkspace, result: ExecutionResult) -> Delivery: ...
 
 
 @dataclass(frozen=True)
@@ -143,22 +172,25 @@ def worker_id(executor: Executor) -> str:
 
 
 def run_next(
-    store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver, source: TaskSource | None = None
+    store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver, source: TaskSource | None = None,
+    deliverer: Deliverer | None = None,
 ) -> WorkRequest | None:
     """Claim the oldest pending request and run it. None if nothing is pending.
 
     source assembles the task; the default uses only what was approved.
+    deliverer turns a changed result into a local branch and commit; without
+    one, a changed result stays uncommitted in the workspace.
     """
     claimed = store.claim_next(worker_id(executor))
     if claimed is None:
         log.info("no pending work requests")
         return None
-    return _run_claimed(store, executor, resolver, source or ApprovalOnly(), claimed)
+    return _run_claimed(store, executor, resolver, source or ApprovalOnly(), claimed, deliverer)
 
 
 def run_request(
     store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver, work_request_id: str,
-    source: TaskSource | None = None,
+    source: TaskSource | None = None, deliverer: Deliverer | None = None,
 ) -> tuple[WorkRequest, bool]:
     """Run one specific request, if it's pending.
 
@@ -173,12 +205,12 @@ def run_request(
             raise InvalidTransition(f"{work_request_id} does not exist")
         log.info("%s is %s; not executing it", work_request_id, current.status)
         return current, False
-    return _run_claimed(store, executor, resolver, source or ApprovalOnly(), claimed), True
+    return _run_claimed(store, executor, resolver, source or ApprovalOnly(), claimed, deliverer), True
 
 
 def _run_claimed(
     store: WorkRequestStore, executor: Executor, resolver: WorkspaceResolver, source: TaskSource,
-    claimed: WorkRequest,
+    claimed: WorkRequest, deliverer: Deliverer | None = None,
 ) -> WorkRequest:
     wr = claimed.work_request_id
     log.info("%s claimed by %s (issue %s, project %s)", wr, claimed.claimed_by, claimed.issue_id, claimed.project_id)
@@ -198,12 +230,38 @@ def _run_claimed(
     except Exception as exc:  # the executor failed; a crash (SystemExit, a killed process) isn't caught
         log.exception("%s: executor %s raised", wr, executor.name)
         result = ExecutionResult(outcome="failed", message=f"{executor.name} raised {type(exc).__name__}: {exc}")
+    # Only a changed result is delivered: no_change and failed never touch git.
+    delivery = None
+    if result.outcome == "changed" and deliverer is not None:
+        try:
+            delivery = deliverer.deliver(claimed, workspace, result)
+        except Exception as exc:  # never leave the request running because delivery broke
+            log.warning("%s: local delivery refused: %s", wr, exc)
+            exc = exc if isinstance(exc, DeliveryError) else DeliveryError(f"{type(exc).__name__}: {exc}")
+            result = result.model_copy(update={
+                "outcome": "failed",
+                "message": f"Local delivery refused, nothing committed: {exc}. The agent's work: {result.message}",
+                "details": result.details | {"delivery_error": str(exc)},
+            })
+        else:
+            result = result.model_copy(update={
+                "message": f"{result.message} Committed {delivery.commit_sha[:12]} on local branch {delivery.branch} "
+                           f"({_diff_line(delivery.diff)}); not pushed, awaiting human review.",
+            })
     # Record where the work is, so it can be inspected (it's never deleted here),
-    # and the executor's details in a file beside it (the store keeps the message).
-    _write_details(workspace, wr, task, result)
-    finished = store.finish(wr, result.outcome, f"{result.message} [workspace: {workspace.path}]")
-    log.info("%s %s: %s", wr, finished.status, finished.result_message)
+    # and the details in a file beside it (the store keeps the message).
+    _write_details(workspace, wr, task, result, delivery)
+    finished = store.finish(
+        wr, result.outcome, f"{result.message} [workspace: {workspace.path}]",
+        branch=delivery.branch if delivery else None, commit_sha=delivery.commit_sha if delivery else None,
+    )
+    log.info("%s %s (%s): %s", wr, finished.status, finished.outcome, finished.result_message)
     return finished
+
+
+def _diff_line(diff: dict[str, Any]) -> str:
+    return (f"{len(diff.get('files', []))} files, +{diff.get('insertions', 0)} "
+            f"-{diff.get('deletions', 0)}")
 
 
 def details_path(workspace: ExecutionWorkspace) -> Path:
@@ -211,9 +269,16 @@ def details_path(workspace: ExecutionWorkspace) -> Path:
     return workspace.path.with_name(workspace.path.name + ".json")
 
 
-def _write_details(workspace: ExecutionWorkspace, wr: str, task: ExecutionTask, result: ExecutionResult) -> None:
+def _write_details(workspace: ExecutionWorkspace, wr: str, task: ExecutionTask, result: ExecutionResult,
+                   delivery: Delivery | None = None) -> None:
     record = {"work_request_id": wr, "issue_id": task.issue_id, "outcome": result.outcome,
-              "message": result.message, "details": result.details}
+              "message": result.message, "files_changed": result.files_changed, "details": result.details,
+              "workspace": str(workspace.path),
+              "delivery": {
+                  "branch": delivery.branch, "commit": delivery.commit_sha, "diff": delivery.diff,
+                  "left_uncommitted": list(delivery.left_uncommitted),
+                  "review": "pending: inspect the workspace; nothing has been pushed",
+              } if delivery else None}
     try:
         details_path(workspace).write_text(json.dumps(record, indent=2, default=str) + "\n")
     except OSError as exc:  # the outcome is still recorded in the store
@@ -246,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     backfill.add_argument("work_request_id")
     backfill.add_argument("project_id")
+    review = commands.add_parser("review", help="show what a finished run left for human review")
+    review.add_argument("work_request_id")
     args = parser.parse_args(argv)
 
     store = open_store()
@@ -262,6 +329,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "release":
             print(_describe(store.release(args.work_request_id)))
             return 0
+        if args.command == "review":
+            return _review(store, args.work_request_id)
         if args.command == "backfill-project":
             request = store.backfill_project(args.work_request_id, args.project_id)
             print(f"{_describe(request)} (project {request.project_id})")
@@ -295,18 +364,21 @@ def _run(store: WorkRequestStore, work_request_id: str | None, kind: str, max_tu
         except TaskContextError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        from cycle_runner.git_delivery import LocalGitDelivery
+
         executor = ClaudeCodeExecutor(max_turns=max_turns, max_budget_usd=max_budget_usd)
+        deliverer: Deliverer | None = LocalGitDelivery()  # a changed result becomes a local commit
     else:
         from cycle_runner.fake_executor import FakeExecutor
 
-        source, executor = ApprovalOnly(), FakeExecutor()
+        source, executor, deliverer = ApprovalOnly(), FakeExecutor(), None
     if work_request_id:
-        request, executed = run_request(store, executor, resolver, work_request_id, source)
+        request, executed = run_request(store, executor, resolver, work_request_id, source, deliverer)
         if not executed:
             print(f"{request.work_request_id} is already {request.status}; nothing executed.")
             return 0
     else:
-        request = run_next(store, executor, resolver, source)
+        request = run_next(store, executor, resolver, source, deliverer)
         if request is None:
             print("No pending work requests.")
             return 0
@@ -314,8 +386,53 @@ def _run(store: WorkRequestStore, work_request_id: str | None, kind: str, max_tu
     return 0 if request.status == "completed" else 1
 
 
+def _review(store: WorkRequestStore, work_request_id: str) -> int:
+    """The human review point: everything a finished run left, from the store and its record."""
+    from cycle_runner.projects import ProjectConfigError, load_projects
+
+    request = store.get(work_request_id)
+    if request is None:
+        raise InvalidTransition(f"{work_request_id} does not exist")
+    print(_describe(request))
+    if request.status not in ("completed", "failed"):
+        return 0
+    try:
+        workspace = load_projects().workspace_root / request.work_request_id
+    except ProjectConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    record_path = details_path(ExecutionWorkspace(path=workspace, test_command=""))
+    try:
+        record = json.loads(record_path.read_text())
+    except (OSError, ValueError):
+        print(f"workspace: {workspace} (no run record at {record_path})")
+        return 0
+    details, delivery = record.get("details", {}), record.get("delivery")
+    print(f"outcome:   {record.get('outcome')}")
+    print(f"workspace: {workspace}")
+    print(f"record:    {record_path}")
+    tail = (details.get("tests_output_tail") or "").strip().splitlines()
+    tests = next((line for line in reversed(tail) if " passed" in line or " failed" in line or line == "OK"), None)
+    print(f"tests:     {details.get('tests_observed', 0)} observed run(s); last: {tests or 'n/a'}")
+    if delivery:
+        diff = delivery["diff"]
+        print(f"branch:    {delivery['branch']} (local only, no remote)")
+        print(f"commit:    {delivery['commit']}")
+        print(f"diff:      {_diff_line(diff)}; added {diff['files_added']}, "
+              f"changed {diff['files_changed']}, deleted {diff['files_deleted']}")
+        left = delivery.get("left_uncommitted", [])
+        for item in left[:10]:
+            print(f"  not committed: {item}")
+        if len(left) > 10:
+            print(f"  not committed: {len(left) - 10} more (all listed in {record_path.name})")
+        print(f"inspect:   git -C {workspace} show --stat {delivery['commit'][:12]}")
+        print("review:    pending. Nothing has been pushed; no PR exists.")
+    return 0
+
+
 def _describe(request: WorkRequest) -> str:
-    parts = [request.work_request_id, request.issue_id, request.status]
+    parts = [request.work_request_id, request.issue_id,
+             request.status + (f" ({request.outcome})" if request.status == "completed" and request.outcome else "")]
     if request.claimed_by:
         parts.append(f"by {request.claimed_by}")
     if request.result_message:

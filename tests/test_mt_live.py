@@ -23,6 +23,7 @@ import pytest
 
 from cycle_runner.claude_executor import ClaudeCodeExecutor
 from cycle_runner.executor import ExecutionWorkspace, details_path, run_request
+from cycle_runner.git_delivery import LocalGitDelivery
 from cycle_runner.issue_context import LinearIssueSource
 from cycle_runner.projects import WorkspaceResolver, load_projects
 from cycle_runner.work_requests import WorkRequestStore
@@ -87,7 +88,7 @@ def test_sb_640_on_a_fresh_mt_clone(mt_config, work_request_db):
 
     done, executed = run_request(
         store, ClaudeCodeExecutor(max_turns=60, max_budget_usd=3.0), WorkspaceResolver(mt_config),
-        request.work_request_id, LinearIssueSource.from_env(),
+        request.work_request_id, LinearIssueSource.from_env(), LocalGitDelivery(),
     )
 
     print(done.result_message)
@@ -98,12 +99,14 @@ def test_sb_640_on_a_fresh_mt_clone(mt_config, work_request_db):
     assert " raised " not in done.result_message  # finished or failed cleanly, never crashed
     record = json.loads(details_path(ExecutionWorkspace(path=clone, test_command="")).read_text())
     assert record["details"]["turns"] > 0 and (clone.parent / f"{clone.name}.claude").is_dir()
-    changed = [line for line in _git(clone, "status", "--porcelain").splitlines() if not line.startswith("??")]
-    if done.result_message.startswith("No change made."):
-        assert changed == []
-    if done.status == "completed":
-        assert record["details"]["tests_observed"] >= 1
-        assert any(line.endswith(".py") for line in changed), changed
+    if done.outcome == "no_change":  # V1.2's real result; a success now, with nothing to deliver
+        assert done.result_message.startswith("No change was required.")
+        assert record["details"]["tests_observed"] >= 1 and record["delivery"] is None
+        assert (done.branch, done.commit_sha) == (None, None)
+        assert _git(clone, "branch", "--format=%(refname:short)").split() == ["main"]
+    elif done.outcome == "changed":
+        assert record["details"]["tests_observed"] >= 1 and done.commit_sha
+        assert any(path.endswith(".py") for path in _git(clone, "show", "--name-only", "--format=", "HEAD").split())
     assert _git(clone, "remote") == ""
     assert _checkout_state(origin) == before  # the real checkout was only read
 
@@ -124,13 +127,20 @@ def test_a_small_change_to_mt_passes_mts_tests_in_the_sandbox(mt_config, work_re
     done, executed = run_request(
         store, ClaudeCodeExecutor(max_turns=40, max_budget_usd=3.0), WorkspaceResolver(mt_config),
         request.work_request_id,  # the approval alone: no Linear issue for this one
+        deliverer=LocalGitDelivery(),
     )
 
     print(done.result_message)
     clone = mt_config.workspace_root / request.work_request_id
-    assert executed and done.status == "completed", done.result_message
-    changed = _git(clone, "status", "--porcelain")
-    assert "backend/constants/passwords.py" in changed and "test_password_policy.py" in changed, changed
+    assert executed and (done.status, done.outcome) == ("completed", "changed"), done.result_message
+    # V1.3: one local commit by Cycle Runner, on its own branch, holding only the change.
+    assert _git(clone, "rev-parse", "--abbrev-ref", "HEAD").strip() == done.branch
+    assert _git(clone, "rev-parse", "HEAD").strip() == done.commit_sha
+    assert _git(clone, "rev-parse", "HEAD^").strip() == _git(origin, "rev-parse", "main").strip()
+    committed = _git(clone, "show", "--name-only", "--format=", "HEAD").split()
+    assert "backend/constants/passwords.py" in committed and "backend/tests/unit/test_password_policy.py" in committed
+    assert not [p for p in committed if not p.startswith("backend/") or ".venv" in p or ".python" in p
+                or "pytest-of" in p or p.endswith((".log", ".json"))], committed
     assert "def is_acceptable_password" in (clone / "backend" / "constants" / "passwords.py").read_text()
-    assert _git(clone, "log", "--oneline", "-1") == _git(origin, "log", "--oneline", "-1", "main")  # no commits
+    assert _git(clone, "remote") == ""
     assert _checkout_state(origin) == before

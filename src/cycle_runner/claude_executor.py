@@ -99,10 +99,44 @@ AGENT_LOGIN_VARIABLES = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}  # the 
 class AgentReport(BaseModel):
     """What the agent must hand back (enforced by the SDK's structured output)."""
 
-    outcome: Literal["completed", "failed"]
-    summary: str
+    # Field order is the order the model writes them. summary is last on purpose:
+    # found live, a long summary sometimes swallowed the fields after it (the
+    # model wrote `</summary><parameter name="tests_passed">` into the string),
+    # and after retries it gave up or sent placeholders.
+    outcome: Literal["completed", "no_change", "failed"]
     tests_passed: bool
     tests_command: str
+    summary: str
+
+
+# A summary must say something: what changed (or why nothing needed to), what
+# the tests showed. Found live: "test". These are refused outright.
+MIN_SUMMARY_CHARACTERS = 40
+MIN_SUMMARY_WORDS = 6
+PLACEHOLDER_SUMMARY = re.compile(
+    r"^\W*(test(ing)?|todo|tbd|n/?a|none|null|done|ok(ay)?|placeholder|summary|success(ful)?|completed?|"
+    r"no changes?|nothing|lorem ipsum.*|x+|\.+|-+)\W*$",
+    re.IGNORECASE,
+)
+
+
+TOOL_MARKUP = re.compile(r"</?(parameter|invoke|summary)\b|<parameter name=", re.IGNORECASE)
+
+
+def report_problem(report: AgentReport, test_command: str | None) -> str | None:
+    """Why this report can't be the record of the run, or None. The evidence is checked separately."""
+    summary = " ".join(report.summary.split())
+    if PLACEHOLDER_SUMMARY.match(summary):
+        return f"its summary is a placeholder ({summary!r})"
+    if TOOL_MARKUP.search(summary):
+        return "its summary contains tool-call markup (a garbled report)"
+    if len(summary) < MIN_SUMMARY_CHARACTERS or len(summary.split()) < MIN_SUMMARY_WORDS:
+        return f"its summary is too short to say what was done ({summary!r})"
+    if test_command is not None and " ".join(report.tests_command.split()) != test_command:
+        # Found live: after its real report was rejected by the schema check, the
+        # agent sent placeholders ("summary": "test", "tests_command": "pytest").
+        return f"it names a different test command (`{report.tests_command}`)"
+    return None
 
 
 # --- the task -------------------------------------------------------------------
@@ -134,12 +168,14 @@ def build_prompt(task: ExecutionTask, workspace: ExecutionWorkspace) -> str:
         "non-zero exit code even when it succeeded, so judge the tests by their output "
         "(e.g. the passed/failed summary), not the exit code.\n\n"
         "You can't reach the network, other directories or other commands. "
-        "Don't commit. Report outcome 'completed' only if the code parts are done and "
-        "the tests pass; otherwise report 'failed' and say why.\n\n"
-        "Finish by calling the StructuredOutput tool once with all four fields: outcome, "
-        "summary (plain text, at most about 1500 characters: what you changed, what the "
-        "tests showed, and anything left for a human), tests_passed, and tests_command "
-        "(exactly the command above). Never send placeholder values."
+        "Don't commit. Report outcome 'completed' if you changed code and the tests pass, "
+        "'no_change' if you found nothing needs changing (e.g. it's already done) and the "
+        "tests pass, and otherwise 'failed', saying why.\n\n"
+        "Finish by calling the StructuredOutput tool once with all four fields, in this "
+        "order: outcome, tests_passed, tests_command (exactly the command above), and "
+        "summary: plain prose, at most about 1000 characters, without code, quotation "
+        "marks or markup, saying what you changed, what the tests showed, and anything "
+        "left for a human. Never send placeholder values."
     )
 
 
@@ -383,8 +419,14 @@ def _text(content: str | list[dict[str, Any]] | None) -> str:
 
 def to_execution_result(message: ResultMessage | None, files_changed: list[str],
                         transcript: Transcript | None = None, success_pattern: str | None = None) -> ExecutionResult:
-    """Success only if the SDK run succeeded, the agent reports passing tests, and the
-    observed test runs agree (when a transcript is given)."""
+    """changed, no_change or failed, from the evidence first and the agent's report second.
+
+    changed / no_change need: a clean SDK run; a report that is meaningful and
+    names the command that ran; the agent reporting passing tests; and (with a
+    transcript) an observed passing run of that command after the last edit.
+    Then the files decide: files the executor saw change -> changed, none ->
+    no_change. An agent saying no_change while files changed is a failure.
+    """
     if message is None:
         return ExecutionResult(outcome="failed", message="The coding agent ended without a result.")
     details: dict[str, Any] = {
@@ -406,31 +448,30 @@ def to_execution_result(message: ResultMessage | None, files_changed: list[str],
         return ExecutionResult(
             outcome="failed", message="The coding agent's report didn't match the expected structure.", details=details
         )
-    details |= {"tests_passed": report.tests_passed, "tests_command": report.tests_command, "summary": report.summary}
-    if report.outcome != "completed" or not report.tests_passed:
-        return ExecutionResult(outcome="failed", message=f"The coding agent reports failure: {report.summary}", details=details)
-    if transcript and " ".join(report.tests_command.split()) != transcript.test_command:
-        # Found live: after its real report was rejected by the schema check, the
-        # agent sent placeholders ("summary": "test", "tests_command": "pytest").
-        return ExecutionResult(
-            outcome="failed",
-            message=f"The coding agent's report doesn't describe this run (it names `{report.tests_command}`): "
-                    f"{report.summary}",
-            details=details,
-        )
-    if not files_changed:
-        # Possibly right (the work may already be done), but nothing was delivered: a human decides.
-        return ExecutionResult(
-            outcome="failed", message=f"No change made. The coding agent reports: {report.summary}", details=details
-        )
+    details |= {"agent_outcome": report.outcome, "tests_passed": report.tests_passed,
+                "tests_command": report.tests_command, "summary": report.summary}
+
+    def failed(text: str) -> ExecutionResult:
+        return ExecutionResult(outcome="failed", message=text, files_changed=files_changed, details=details)
+
+    if report.outcome == "failed" or not report.tests_passed:
+        return failed(f"The coding agent reports failure: {report.summary}")
+    untrustworthy = report_problem(report, transcript.test_command if transcript else None)
+    if untrustworthy:
+        return failed(f"The coding agent's report can't be used: {untrustworthy}.")
     problem = transcript.verdict(success_pattern) if transcript else None
     if problem:
-        return ExecutionResult(
-            outcome="failed", message=f"The coding agent reports success, but {problem}: {report.summary}", details=details
-        )
+        return failed(f"The coding agent reports success, but {problem}: {report.summary}")
+    if not files_changed:
+        # Found live (SB-640): the work was already on main. A verified success, not a failure.
+        return ExecutionResult(outcome="no_change", message=f"No change was required. {report.summary}",
+                               details=details)
+    if report.outcome == "no_change":
+        return failed(f"The coding agent reports no change, but changed {_listed(files_changed)}: {report.summary}")
     return ExecutionResult(
-        outcome="completed",
+        outcome="changed",
         message=f"{report.summary} (tests passed; changed {_listed(files_changed)})",
+        files_changed=files_changed,
         details=details,
     )
 

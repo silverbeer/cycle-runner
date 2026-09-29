@@ -120,7 +120,7 @@ def test_the_executor_gets_the_description(store, fixed_workspace):
             from cycle_runner.executor import ExecutionResult
 
             received.append(task)
-            return ExecutionResult(outcome="completed", message="ok")
+            return ExecutionResult(outcome="changed", message="ok")
 
     done, _ = run_request(store, Recording(), fixed_workspace, request.work_request_id,
                           LinearIssueSource(StubLinear(_issue())))

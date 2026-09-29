@@ -13,7 +13,7 @@ class FakeExecutor:
 
     def execute(self, task: ExecutionTask, workspace: ExecutionWorkspace) -> ExecutionResult:
         return ExecutionResult(
-            outcome="completed",
+            outcome="no_change",
             message=(
                 f"Fake execution completed for {task.work_request_id} "
                 f"({task.issue_id}). No real work was done."

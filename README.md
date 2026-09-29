@@ -1461,3 +1461,190 @@ The deliberate run (2026-09-28) ended `failed`: "No change made."
   the observed in-sandbox run.
 - Setup for the other projects (MTA, TRD, JT).
 
+
+## V1.3
+
+Local Git delivery. A verified change becomes a local branch and a commit
+in the disposable clone, made by Cycle Runner and never by the agent.
+Nothing is pushed, no PR is created and nothing is written to Linear. The
+commit waits there for a human.
+
+```
+claim ─► task (Linear, read-only) ─► workspace (fresh clone + setup) ─► Claude (sandboxed)
+      ─► ExecutionResult: changed | no_change | failed
+             │ changed only
+             ▼
+         LocalGitDelivery (outside the sandbox): audit .git ─► select files ─► branch cycle-runner/WR-xxxxxx
+             ─► stage exactly those files ─► check the staged diff ─► commit ─► audit again (still no remote)
+             ▼
+         store: completed (changed), branch, commit_sha   +   WR-xxxxxx.json (diff summary, review: pending)
+```
+
+### Outcomes
+
+The lifecycle `status` is unchanged. A new `outcome` column (schema v4)
+says what came of a run:
+
+| outcome     | status      | meaning                                                                       |
+|-------------|-------------|-------------------------------------------------------------------------------|
+| `changed`   | `completed` | Work done, tests observed passing after the last edit, files changed          |
+| `no_change` | `completed` | Tests observed passing and nothing needed changing (V1.2's SB-640). A success |
+| `failed`    | `failed`    | Anything else, including an untrustworthy report or a refused delivery        |
+
+The files decide between `changed` and `no_change`, not the agent. Only
+files the executor saw the agent change count, not test byproducts. An
+agent that says `no_change` while files changed fails. A database trigger
+keeps `outcome` consistent with `status`.
+
+"Needs a human" isn't a separate state. The agent is asked to list
+anything it couldn't do in its summary, and every outcome already waits for
+a person.
+
+### Meaningless reports
+
+A report fails the run when:
+- its summary is a placeholder (`test`, `TODO`, `done`, `n/a`, …) or too
+  short (under 40 characters or 6 words);
+- its summary contains tool-call markup;
+- it names a test command other than the one that ran.
+
+The evidence is still checked independently: observed test runs, attributed
+file changes and the git diff.
+
+Root cause, found in the agent's transcripts: the model sometimes wrote
+tool-call markup (`</summary><parameter name="tests_passed">`) into the long
+summary string. That swallowed the fields after it; after retries it gave up
+or sent placeholders, which is where V1.2's `summary: "test"` came from.
+`summary` is now the last field in the schema, and the prompt asks for plain
+prose. In the live runs since, the report was accepted on the first attempt.
+
+### Branch and commit
+
+- **Branch:** `cycle-runner/WR-000123`, built only from a validated work
+  request id (`^WR-\d{6,}$`), then checked with `git check-ref-format`. An
+  existing branch is never reused.
+- **Commit:** author and committer are `Cycle Runner
+  <cycle-runner@localhost.invalid>`, made with `--no-verify` and no signing.
+- **Message:** the issue id plus the title approved at approval time. Control
+  characters are removed, whitespace is collapsed, and the subject is capped
+  at 72 characters. The issue description never goes in. An unusual issue id
+  becomes `Cycle Runner: …`. The message goes through stdin, never a shell.
+- **Base:** exactly one commit on top of the clone's HEAD, checked after
+  committing.
+
+### Which files get committed
+
+A file is committed only if **git** reports it changed **and** the
+executor saw the agent change it. Everything else stays in the workspace,
+uncommitted, and is listed with a reason. Test byproducts (for MT, about
+120 pytest temp files) are left this way.
+
+Never committed, whatever `.gitignore` says:
+- **Dependency, cache and tool directories:** `.venv`, `venv`, `.python`,
+  `node_modules`, `site-packages`, `__pycache__`, `.pytest_cache`,
+  `.mypy_cache`, `.ruff_cache`, `.tox`, `.cache`, `.claude`, `.gradle`, IDE
+  directories.
+- **Environment and credential files:** `.env*`, keys and certificates
+  (`*.pem`, `*.key`, `id_*`, …), `.netrc`, `.npmrc`, `.pypirc`, and names
+  containing `credential`, `secret` or `token`.
+- **Generated data:** logs, databases, coverage files.
+- **Cycle Runner's own records:** `WR-*.json`.
+- **Unsafe entries:** symlinks, binaries, and files over 1 MB.
+
+One more rule: if an included file looks like it holds a credential
+(private keys; GitHub, Anthropic, OpenAI, AWS, Slack, Linear or 1Password
+token shapes; or the value of one of the runner's own credential
+variables), the whole delivery is refused. The run fails and nothing is
+committed.
+
+`WR-xxxxxx.json` and `WR-xxxxxx.claude/` sit beside the clone, not inside
+it, so git never sees them.
+
+### Git safety
+
+- **A small, fixed set of git commands:** `rev-parse`, `config --list`,
+  `remote`, `status`, `check-ref-format`, `switch -c`, `add`, `diff
+  --cached`, `commit`, `diff-tree`, plus `reset`, `switch` and `branch -D`
+  to undo a refused delivery. `test_boundaries.py` checks this, and that no
+  `push`, `fetch`, `pull` or `clone` appears.
+- **Hardened git calls.** Every call runs with system and global config off
+  (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`) and with hooks,
+  fsmonitor, signing, pagers and external diff off. `protocol.allow=never`
+  means git can't reach any network. Pathspecs are literal.
+- **Config audited before and after.** The clone's `.git/config` is checked
+  both times. Any remote, url rewrite, include, filter, hooks path or other
+  unexpected key refuses the delivery.
+- **The agent can't have touched `.git`:** the sandbox denies writes there
+  (V1.2).
+- **Tripwires:** a symlinked `.git`, or an index staged by anything else,
+  refuses the delivery.
+- **Found in an independent review, and fixed.** Git read
+  `$HOME/.config/git/attributes` and `ignore` even with global config off,
+  and `HOME` was the workspace. An agent could therefore:
+  - re-encode a secret with `working-tree-encoding`, so the on-disk scan saw
+    nothing, and it was committed;
+  - or hide its own files from `git status`.
+
+  `HOME` is now an empty temp directory, attributes and excludes files are
+  off, and the secret, binary and size checks run on the **staged blob**,
+  the bytes git will actually commit.
+- **Any error during delivery refuses it** (a git timeout, a missing git,
+  an unreadable file), including checks after the commit. The undo removes
+  the commit and the branch and leaves the agent's work unstaged in the
+  working tree. The runner records the run as `failed` instead of leaving it
+  `running`.
+- **File names are compared NFC-normalized**, because macOS git reports
+  precomposed names.
+
+### The human review boundary
+
+```bash
+uv run python -m cycle_runner.executor review WR-000123
+```
+
+It shows the outcome, workspace, run record, tests observed, branch and
+commit, the diff summary (added, changed and deleted files, insertions and
+deletions) and what was left uncommitted. The record says `review: pending`.
+Nothing is approved or pushed automatically, and the workspace is kept.
+
+### No change, failure
+
+- **`no_change` and `failed` never touch git:** no branch and no commit.
+  The clone stays exactly as the agent left it.
+- **A refused delivery** is `failed`, with "Local delivery refused, nothing
+  committed: …". Anything already staged or branched is undone.
+
+### Existing records
+
+WR-000001 keeps its V1.2 record (`failed`, "No change made…", outcome
+`NULL`). A terminal record isn't rewritten, and the `failed → completed`
+transition doesn't exist. The same case is now covered as `no_change` by a
+regression test.
+
+### Tests
+
+- **Offline** (568 in CI): outcomes and the SB-640 regression; meaningless
+  and garbled reports; store outcomes, the trigger and the migration;
+  delivery. The delivery tests cover:
+  - the branch, commit and author;
+  - the diff summary from git;
+  - untracked and unattributed files;
+  - about 20 sensitive and generated paths;
+  - secret shapes and the runner's own secrets;
+  - symlinks, binaries and huge files;
+  - `.gitignore`d files;
+  - a remote or hostile config;
+  - hooks, both the clone's and global ones;
+  - an existing branch, a staged index, a symlinked `.git`;
+  - message and branch sanitizing;
+  - no network protocol;
+  - the runner paths and `review`.
+- **Live** (`-m claude`, `tests/test_mt_live.py`): the disposable greet task
+  and a fresh MT clone each end in one Cycle Runner commit, with byproducts
+  left, no remote and the MT checkout unchanged. SB-640 on a temporary
+  database: when it's `no_change`, no branch is created.
+
+### Not in V1.3
+
+Push, PRs, the GitHub API, Linear writes, running from Telegram, retries,
+CI feedback, approving a delivery, and cleaning up workspaces.
