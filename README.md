@@ -1836,6 +1836,22 @@ uv run python -m cycle_runner.executor reject WR-000007 --commit 1a2b3c4d5e6f --
   PR on `silverbeer/cycle-runner-sandbox`, using the CLI end to end and
   delivering twice.
 
+### Live result (2026-09-29)
+
+`tests/test_github_live.py` ran against `silverbeer/cycle-runner-sandbox`:
+- local commit, review, `approve --commit`, `deliver`;
+- draft PR #1, open, with head `de0983b85ae5` (the approved SHA, one commit
+  by Cycle Runner, one file);
+- a second `deliver` returned the same PR, with no new push and no duplicate;
+- the repo holds `main` plus that branch, and no tags.
+
+Draft PRs work on this private repository.
+
+Limitation: the repository API's `permissions.push` reflects the account's
+role, not the fine-grained token's scope. So "the token may push" is really
+checked by the push itself. A token without write access fails there,
+safely and recorded, before any PR.
+
 ### Not in V1.4
 
 Approving from Telegram, Telegram execution, CI feedback, merging, marking
