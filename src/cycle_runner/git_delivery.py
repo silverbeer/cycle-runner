@@ -7,11 +7,12 @@ Cycle Runner makes the branch and the commit, never the coding agent: the
 agent has no git, and its sandbox can't write .git. These git commands run
 outside the sandbox, so they are privileged and kept to a small fixed set
 (rev-parse, config --list, remote, status, check-ref-format, switch -c, add,
-diff --cached, commit, and reset/switch/branch -D to undo a refused
-delivery). Nothing here takes a git command from configuration or issue text.
+diff --cached, cat-file, commit, diff-tree, and reset/switch/branch -D to
+undo a refused delivery). Nothing here takes a git command from configuration or issue text.
 
-Every git call runs with the user's and the system's git configuration off,
-hooks off, fsmonitor off, signing off and literal pathspecs. The clone's own
+Every git call runs with the user's and the system's git configuration,
+attributes and excludes off (and an empty temporary HOME), hooks off,
+fsmonitor off, signing off and literal pathspecs. The clone's own
 .git/config is audited first: anything but basic core and branch settings
 (a remote, a url rewrite, an include, a filter, ...) refuses the delivery.
 
@@ -22,7 +23,8 @@ What gets committed is decided here, not by the agent's report:
   credentials, logs, databases, or Cycle Runner's own records, whatever
   .gitignore says;
 - never symlinks, binaries or very large files;
-- and nothing at all if an included file looks like it contains a secret.
+- and nothing at all if an included file looks like it contains a secret,
+  checked both on disk and as the blob git staged.
 Everything else stays in the workspace, uncommitted, and is listed.
 
 This module knows git and paths. It knows nothing about Claude, ADK,
@@ -34,6 +36,8 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -54,6 +58,7 @@ GIT_TIMEOUT_SECONDS = 60
 # command does. Forced off, whatever any configuration says.
 HARDENING = (
     "core.hooksPath=/dev/null", "core.fsmonitor=false", "core.pager=cat", "core.quotePath=false",
+    "core.attributesFile=/dev/null", "core.excludesFile=/dev/null",
     "commit.gpgSign=false", "tag.gpgSign=false", "diff.external=", "protocol.allow=never", "advice.detachedHead=false",
 )
 # The only .git/config keys a fresh clone (with origin removed) should have.
@@ -111,6 +116,11 @@ def commit_message(request: WorkRequest) -> str:
     )
 
 
+def _nfc(path: str) -> str:
+    """One spelling per name: macOS git reports precomposed (NFC) names; files may be stored decomposed."""
+    return unicodedata.normalize("NFC", path)
+
+
 def protected_reason(path: str) -> str | None:
     """Why a workspace-relative path must never be committed, or None."""
     parts = PurePosixPath(path).parts
@@ -135,8 +145,25 @@ class LocalGitDelivery:
         self._secrets = [value.encode() for name, value in environ.items()
                          if CREDENTIAL_NAME.search(name) and len(value) >= 12]
         self._path = environ.get("PATH", "/usr/bin:/bin")
+        self._home: str | None = None
 
     def deliver(self, request: WorkRequest, workspace: ExecutionWorkspace, result: ExecutionResult) -> Delivery:
+        """Any failure, of any kind, is a DeliveryError with the workspace put back as it was."""
+        with tempfile.TemporaryDirectory(prefix="cycle-runner-git-") as home:
+            # An empty HOME and XDG_CONFIG_HOME: found in review, git reads
+            # $HOME/.config/git/attributes and .../ignore even with the global
+            # config off, and HOME must not be anywhere the agent could write.
+            self._home = home
+            try:
+                return self._deliver(request, workspace, result)
+            except DeliveryError:
+                raise
+            except Exception as exc:  # a timeout, git missing, an unreadable file, ...
+                raise DeliveryError(f"{type(exc).__name__}: {exc}") from None
+            finally:
+                self._home = None
+
+    def _deliver(self, request: WorkRequest, workspace: ExecutionWorkspace, result: ExecutionResult) -> Delivery:
         root = workspace.path.resolve()
         branch = branch_name(request.work_request_id)
         git_dir = workspace.path / ".git"
@@ -150,7 +177,7 @@ class LocalGitDelivery:
         base = self._git(root, "rev-parse", "HEAD").stdout.strip()
         original = self._git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
-        include, left = self._select(root, set(result.files_changed))
+        include, left = self._select(root, {_nfc(path) for path in result.files_changed})
         if not include:
             raise DeliveryError("nothing committable: " + ("; ".join(left) or "no changed files"))
 
@@ -161,18 +188,23 @@ class LocalGitDelivery:
             staged = {entry["path"] for entry in diff["files"]}
             if staged != include:
                 raise DeliveryError(f"staged files {sorted(staged)} differ from the selected {sorted(include)}")
+            # What git will commit, not what is on disk: found in review, attributes
+            # (working-tree-encoding, filters, eol, ident) can transform content on add.
+            for entry in diff["files"]:
+                if entry["status"] != "deleted":
+                    self._check_blob(root, entry["path"])
             self._git(root, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "--file", "-",
                       input=commit_message(request))
-        except (DeliveryError, subprocess.SubprocessError) as exc:
-            self._undo(root, original, branch)
-            raise exc if isinstance(exc, DeliveryError) else DeliveryError(str(exc)) from None
-
-        commit = self._git(root, "rev-parse", "HEAD").stdout.strip()
-        committed = set(self._git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames",
-                                  "HEAD").stdout.split("\0")) - {""}
-        if self._git(root, "rev-parse", "HEAD^").stdout.strip() != base or committed != include:
-            raise DeliveryError(f"the commit {commit[:12]} isn't exactly the selected change")
-        self._audit(root)  # still no remote
+            commit = self._git(root, "rev-parse", "HEAD").stdout.strip()
+            committed = {_nfc(path) for path in self._git(
+                root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", "HEAD",
+            ).stdout.split("\0") if path}
+            if self._git(root, "rev-parse", "HEAD^").stdout.strip() != base or committed != include:
+                raise DeliveryError(f"the commit {commit[:12]} isn't exactly the selected change")
+            self._audit(root)  # still no remote
+        except BaseException:
+            self._undo(root, base, original, branch)
+            raise
         log.info("%s committed %s on %s", request.work_request_id, commit[:12], branch)
         return Delivery(branch=branch, commit_sha=commit, diff=diff, left_uncommitted=tuple(left))
 
@@ -194,7 +226,7 @@ class LocalGitDelivery:
         left: list[str] = []
         seen: set[str] = set()
         for entry in filter(None, entries.split("\0")):
-            code, path = entry[:2], entry[3:]
+            code, path = entry[:2], _nfc(entry[3:])
             seen.add(path)
             if code[0] not in " ?":
                 raise DeliveryError(f"the index was changed outside Cycle Runner ({path})")
@@ -228,9 +260,19 @@ class LocalGitDelivery:
         content = resolved.read_bytes()
         if b"\0" in content[:8192]:
             return "a binary file"
+        self._check_content(path, content)
+        return None
+
+    def _check_content(self, path: str, content: bytes) -> None:
         if SECRET_CONTENT.search(content) or any(secret in content for secret in self._secrets):
             raise DeliveryError(f"{path} looks like it contains a credential; nothing was committed")
-        return None
+
+    def _check_blob(self, root: Path, path: str) -> None:
+        """The staged content of path: no secrets, not binary, not huge."""
+        blob = self._git(root, "cat-file", "blob", f":{path}", binary=True).stdout
+        if len(blob) > MAX_FILE_BYTES or b"\0" in blob[:8192]:
+            raise DeliveryError(f"{path} is staged as binary or oversized content; nothing was committed")
+        self._check_content(path, blob)
 
     def _staged_diff(self, root: Path) -> dict[str, Any]:
         """Machine-readable summary of what is about to be committed, from git itself."""
@@ -254,16 +296,24 @@ class LocalGitDelivery:
             "deletions": sum(f["deletions"] for f in files),
         }
 
-    def _undo(self, root: Path, original: str, branch: str) -> None:
-        """Back to where delivery started: nothing staged, the original branch, no new branch."""
-        for args in (("reset", "--quiet"), ("switch", "--quiet", original), ("branch", "--quiet", "-D", branch)):
-            self._git(root, *args, check=False)
+    def _undo(self, root: Path, base: str, original: str, branch: str) -> None:
+        """Back to where delivery started: no commit, nothing staged, the original branch, no
+        new branch. The agent's changes stay in the working tree, for inspection."""
+        for args in (("reset", "--quiet", "--soft", base), ("reset", "--quiet"), ("switch", "--quiet", original),
+                     ("branch", "--quiet", "-D", branch)):
+            try:
+                self._git(root, *args, check=False)
+            except Exception:  # best effort; the run is recorded as failed either way
+                log.exception("undo step git %s failed", args[0])
 
     # --- the one way git is run ---------------------------------------------------
 
-    def _git(self, root: Path, *args: str, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def _git(self, root: Path, *args: str, input: str | None = None, check: bool = True,
+             binary: bool = False) -> subprocess.CompletedProcess:
+        if self._home is None:
+            raise DeliveryError("git runs only inside deliver()")
         env = {
-            "PATH": self._path, "HOME": str(root), "LC_ALL": "C",
+            "PATH": self._path, "HOME": self._home, "XDG_CONFIG_HOME": self._home, "LC_ALL": "C",
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0",
             "GIT_LITERAL_PATHSPECS": "1", "GIT_OPTIONAL_LOCKS": "0", "GIT_EDITOR": "true",
             "GIT_AUTHOR_NAME": AUTHOR_NAME, "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
@@ -272,9 +322,10 @@ class LocalGitDelivery:
         hardening = [item for setting in HARDENING for item in ("-c", setting)]
         result = subprocess.run(
             ["git", *hardening, "-C", str(root), *args], env=env, input=input,
-            capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS,
+            capture_output=True, text=not binary, timeout=GIT_TIMEOUT_SECONDS,
         )
         if check and result.returncode != 0:
-            detail = (result.stderr.strip().splitlines() or ["no output"])[-1]
+            stderr = result.stderr.decode(errors="replace") if binary else result.stderr
+            detail = (stderr.strip().splitlines() or ["no output"])[-1]
             raise DeliveryError(f"git {args[0]} failed: {detail}")
         return result

@@ -235,8 +235,9 @@ def _run_claimed(
     if result.outcome == "changed" and deliverer is not None:
         try:
             delivery = deliverer.deliver(claimed, workspace, result)
-        except DeliveryError as exc:
+        except Exception as exc:  # never leave the request running because delivery broke
             log.warning("%s: local delivery refused: %s", wr, exc)
+            exc = exc if isinstance(exc, DeliveryError) else DeliveryError(f"{type(exc).__name__}: {exc}")
             result = result.model_copy(update={
                 "outcome": "failed",
                 "message": f"Local delivery refused, nothing committed: {exc}. The agent's work: {result.message}",

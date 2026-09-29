@@ -282,7 +282,7 @@ def test_only_the_resolver_reads_project_configuration():
 # --- V1.3: local git delivery ------------------------------------------------------
 
 GIT_OPERATIONS = {"rev-parse", "config", "remote", "status", "check-ref-format", "switch", "add", "diff",
-                  "commit", "diff-tree", "reset", "branch"}
+                  "commit", "diff-tree", "reset", "branch", "cat-file"}
 
 
 def _git_operations(module: str) -> set[str]:
@@ -312,7 +312,7 @@ def test_only_projects_and_delivery_start_processes():
 
 def test_delivery_knows_nothing_about_claude_linear_or_the_conversation():
     imports = _imported_modules(PACKAGE / "git_delivery.py")
-    assert imports == {"logging", "os", "re", "subprocess", "pathlib", "typing", "cycle_runner.executor",
+    assert imports == {"logging", "os", "re", "subprocess", "tempfile", "unicodedata", "pathlib", "typing", "cycle_runner.executor",
                        "cycle_runner.work_requests"}
 
 

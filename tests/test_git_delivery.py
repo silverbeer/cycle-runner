@@ -445,3 +445,109 @@ def test_review_of_a_no_change_run_has_no_delivery(store, projects_config, capsy
     out = capsys.readouterr().out
     assert "completed (no_change)" in out and "outcome:   no_change" in out
     assert "branch:" not in out and "commit:" not in out
+
+
+# --- found in review ------------------------------------------------------------------------
+
+EBCDIC_SECRET = ("token = ghp_" + "A" * 36 + "\n").encode("cp037")
+
+
+def test_a_secret_hidden_by_an_encoding_attribute_is_caught_in_the_staged_blob(store, workspace):
+    # On disk the file is EBCDIC (no match); .gitattributes makes git store it as UTF-8.
+    result = _the_agents_change(workspace)
+    _write(workspace, ".gitattributes", "src/data.txt working-tree-encoding=IBM037\n")  # not attributed
+    (workspace.path / "src" / "data.txt").write_bytes(EBCDIC_SECRET)
+    assert b"ghp_" not in EBCDIC_SECRET
+    result = result.model_copy(update={"files_changed": [*result.files_changed, "src/data.txt"]})
+
+    with pytest.raises(DeliveryError, match="src/data.txt looks like it contains a credential"):
+        LocalGitDelivery(environ={}).deliver(_request(store), workspace, result)
+
+    assert _branches(workspace) == ["main"] and git(workspace, "log", "--oneline").count("\n") == 1
+    assert git(workspace, "diff", "--cached", "--name-only") == ""  # nothing left staged
+
+
+def test_git_config_attributes_and_ignores_under_the_workspace_are_not_read(store, workspace):
+    # HOME used to be the workspace, so <workspace>/.config/git/{attributes,ignore} applied.
+    result = _the_agents_change(workspace)
+    _write(workspace, ".config/git/attributes", "src/data.txt working-tree-encoding=IBM037\n")
+    _write(workspace, ".config/git/ignore", "tests/test_greet.py\n")
+    (workspace.path / "src" / "data.txt").write_bytes(b"plain text, nothing secret here\n")
+    result = result.model_copy(update={"files_changed": [*result.files_changed, "src/data.txt"]})
+
+    LocalGitDelivery(environ={}).deliver(_request(store), workspace, result)
+
+    committed = git(workspace, "show", "--name-only", "--format=", "HEAD").split()
+    assert "tests/test_greet.py" in committed  # not hidden by the workspace's "global" ignore
+    staged = subprocess.run(["git", "-C", str(workspace.path), "show", "HEAD:src/data.txt"], capture_output=True).stdout
+    assert staged == b"plain text, nothing secret here\n"  # no re-encoding applied
+
+
+def test_any_error_during_delivery_is_a_refusal_not_a_crash(store, workspace, monkeypatch):
+    def unreadable(*args, **kwargs):
+        raise PermissionError("unreadable")
+
+    monkeypatch.setattr(LocalGitDelivery, "_excluded", unreadable)
+    with pytest.raises(DeliveryError, match="PermissionError: unreadable"):
+        LocalGitDelivery(environ={}).deliver(_request(store), workspace, _the_agents_change(workspace))
+
+
+def test_a_git_timeout_is_a_refusal(store, workspace, monkeypatch):
+    real_run = subprocess.run
+
+    def slow(args, **kwargs):
+        if args[0] == "git" and "status" in args:
+            raise subprocess.TimeoutExpired(args, 60)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    with pytest.raises(DeliveryError, match="TimeoutExpired"):
+        LocalGitDelivery(environ={}).deliver(_request(store), workspace, _the_agents_change(workspace))
+
+
+def test_a_check_failing_after_the_commit_undoes_the_commit_and_the_branch(store, workspace, monkeypatch):
+    real_audit = LocalGitDelivery._audit
+    calls = []
+
+    def second_audit_fails(self, root):
+        calls.append(root)
+        if len(calls) == 2:  # the audit after committing
+            raise DeliveryError("the workspace has a remote")
+        return real_audit(self, root)
+
+    monkeypatch.setattr(LocalGitDelivery, "_audit", second_audit_fails)
+    with pytest.raises(DeliveryError, match="has a remote"):
+        LocalGitDelivery(environ={}).deliver(_request(store), workspace, _the_agents_change(workspace))
+
+    assert _branches(workspace) == ["main"] and git(workspace, "log", "--oneline").count("\n") == 1
+    assert git(workspace, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+    assert sorted(git(workspace, "status", "--porcelain", "--untracked-files=all").split()) == \
+        sorted(["M", "src/hello.py", "??", "tests/test_greet.py"])  # the agent's work is still there, unstaged
+
+
+def test_the_runner_records_any_delivery_crash_as_a_failed_run(store, workspace):
+    _request(store)
+
+    class Broken:
+        def deliver(self, *args):
+            raise RuntimeError("disk full")
+
+    done = run_next(store, Agent(), FixedWorkspace(workspace), deliverer=Broken())
+
+    assert (done.status, done.outcome) == ("failed", "failed")  # not stuck in running
+    assert done.result_message.startswith("Local delivery refused, nothing committed: RuntimeError: disk full")
+
+
+def test_a_decomposed_unicode_file_name_is_committed(store, workspace):
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFD", "src/café.py")
+    result = _the_agents_change(workspace)
+    (workspace.path / decomposed).write_text("x = 1\n")
+    result = result.model_copy(update={"files_changed": [*result.files_changed, decomposed]})
+
+    LocalGitDelivery(environ={}).deliver(_request(store), workspace, result)
+
+    committed = subprocess.run(["git", "-C", str(workspace.path), "show", "--name-only", "-z", "--format=", "HEAD"],
+                               capture_output=True, text=True).stdout.split("\0")
+    assert unicodedata.normalize("NFC", "src/café.py") in [unicodedata.normalize("NFC", c) for c in committed]

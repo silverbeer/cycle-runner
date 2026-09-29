@@ -1578,6 +1578,23 @@ it, so git never sees them.
   (V1.2).
 - **Tripwires:** a symlinked `.git`, or an index staged by anything else,
   refuses the delivery.
+- **Found in an independent review, and fixed.** Git read
+  `$HOME/.config/git/attributes` and `ignore` even with global config off,
+  and `HOME` was the workspace. An agent could therefore:
+  - re-encode a secret with `working-tree-encoding`, so the on-disk scan saw
+    nothing, and it was committed;
+  - or hide its own files from `git status`.
+
+  `HOME` is now an empty temp directory, attributes and excludes files are
+  off, and the secret, binary and size checks run on the **staged blob**,
+  the bytes git will actually commit.
+- **Any error during delivery refuses it** (a git timeout, a missing git,
+  an unreadable file), including checks after the commit. The undo removes
+  the commit and the branch and leaves the agent's work unstaged in the
+  working tree. The runner records the run as `failed` instead of leaving it
+  `running`.
+- **File names are compared NFC-normalized**, because macOS git reports
+  precomposed names.
 
 ### The human review boundary
 
