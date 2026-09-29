@@ -1648,3 +1648,176 @@ regression test.
 
 Push, PRs, the GitHub API, Linear writes, running from Telegram, retries,
 CI feedback, approving a delivery, and cleaning up workspaces.
+
+## V1.4
+
+Human-approved GitHub delivery. It's Cycle Runner's first GitHub write. A
+local commit (V1.3) reaches GitHub only after a person approves that exact
+commit on the command line. Then it's pushed as one branch and opened as a
+**draft** PR. Nothing is approved automatically, and nothing is merged.
+
+```
+ WorkRequest (completed, changed)           DeliveryApproval (separate record, same database)
+ branch cycle-runner/WR-7, commit abc…
+        │
+        ▼  review WR-7               local only: re-verify the commit, show files, diff, tests, state
+ review_pending
+        │
+        ▼  approve WR-7 --commit abc1234     re-verify ─► record: full SHA, branch, base, repository,
+ approved (APR-3, abc…) ◄───────────────────              evidence, who, when. Immutable.
+        │
+        ▼  deliver WR-7   (the only process with CYCLE_RUNNER_GITHUB_TOKEN)
+        │   1. re-verify the local commit == abc…   ─ mismatch ─► APR-3 invalid, nothing pushed
+        │   2. repository = projects.toml = APR-3's; exists, not archived, token may push
+        │   3. base already on GitHub's main (so exactly one commit goes up)
+        │   4. git push <url> abc…:refs/heads/cycle-runner/WR-7   (no remote added, no force, no tags)
+        │   5. GitHub's cycle-runner/WR-7 == abc…
+ pushed ─────────────────────────────────── 6. find or create one draft PR for the branch at abc…
+        ▼
+ pr_created (PR #n)
+```
+
+### Approval: bound to one SHA
+
+`approve WR-x --commit <sha>` is the only way to approve. The human names
+the commit they reviewed (at least 7 characters of its SHA). A mismatch
+refuses the approval, and a conversation can't approve anything.
+
+Before recording anything, the local commit is verified again:
+- the workspace exists;
+- `.git` is a plain directory with no remote and no unusual configuration;
+- the branch exists, HEAD is on it, and both are at the recorded commit;
+- the commit exists, has exactly one parent, and that parent is the clone's
+  `main`, so there's exactly one commit on top;
+- Cycle Runner authored and committed it;
+- its files and line counts match the V1.3 record;
+- no protected files, secrets, binaries or oversized files are in it.
+
+The approval record keeps the full SHA, branch, base SHA, project, target
+repository (from `projects.toml`), and who approved and when. It also keeps
+the evidence the human saw: message, tree, diff and observed tests.
+
+The database enforces the rules itself:
+- none of those fields can ever change;
+- approvals are never deleted;
+- only a completed, `changed` request's own recorded commit can be approved;
+- each request has at most one live approval.
+
+Delivery states: `approved → pushed → pr_created`. `invalid` and `rejected`
+are final. The work request itself is untouched: a failed push is a
+delivery failure (`last_error` on the approval), not failed engineering.
+
+If the commit changes after approval (amended, moved, a new commit, a
+changed record), the next `deliver` marks the approval `invalid` and pushes
+nothing. The approval never moves to another commit, and a new commit can't
+be approved against the old request. A new explicit approval is needed.
+
+### The GitHub credential
+
+- **A fine-grained personal access token**, limited to the delivery
+  repositories: Contents read/write and Pull requests read/write. It's stored
+  in 1Password (`op://agents/cycle-runner-github/token`) and referenced only by
+  `.env.github`.
+- **Only `deliver` gets it** (`op run --env-file .env.github -- …`). The bot's
+  `.env` doesn't contain it.
+- **The coding agent never gets it.** `run --executor claude` refuses to start
+  if `CYCLE_RUNNER_GITHUB_TOKEN` is in its environment. The agent's sandbox
+  would blank and deny it anyway, like every `*TOKEN*` variable.
+- **git receives it as an in-memory `http.extraHeader`** via `GIT_CONFIG_*`
+  environment variables. It's never in argv, a file, a remote or the
+  workspace. The API receives it in a header. It's scrubbed from any error
+  text and never logged.
+
+### Push
+
+The push is exactly one refspec, `git push --porcelain --no-verify
+--no-follow-tags <https://github.com/owner/name.git> <sha>:refs/heads/<branch>`,
+with the same hardened git as V1.3. `protocol.https` is allowed for that one
+call only. There's no remote, no force, no tags and no other refs.
+
+The target is `github = "owner/name"` in `projects.toml`, never the clone.
+If it has changed since approval, delivery stops.
+
+The approved commit's base must already be on the GitHub base branch.
+Otherwise the push would publish the local checkout's unpushed commits too,
+so delivery stops.
+
+After pushing, GitHub is asked where the branch is. Anything but the
+approved SHA is a delivery failure.
+
+### Draft PR
+
+- **Always a draft.** A PR created as ready for review is treated as a
+  failure.
+- **Title:** the commit subject.
+- **Body:**
+  - a Cycle Runner banner;
+  - the issue id and approved title, project, work request, commit and base,
+    and who approved it and when;
+  - changed files with line counts;
+  - tests, stated only from evidence ("ran N times; last result: …", or "No
+    test run was observed. Treat this change as untested.");
+  - the agent's summary, labelled as its own unverified words.
+- **Neutralized:** `@mentions` and issue-closing keywords from agent or
+  issue text. The issue description isn't copied.
+
+### Idempotency and recovery
+
+| Situation                                   | `deliver` does                                           |
+|---------------------------------------------|----------------------------------------------------------|
+| Branch already on GitHub at the approved SHA | Doesn't push again                                      |
+| Branch on GitHub at any other commit         | Stops; nothing pushed                                   |
+| A PR for the branch at that SHA exists       | Reuses it (no duplicate)                                |
+| Pushed, PR creation failed                   | State `pushed` + error; running again creates only the PR |
+| Auth/permission failure                      | Error recorded; approval stays `approved`; nothing pushed |
+| Push failure                                 | Error recorded; no PR; no new commit                    |
+| Local commit changed                         | Approval `invalid`; nothing pushed; approve again        |
+| Already `pr_created`                         | Returns it                                              |
+
+### Security model, in one place
+
+- **The agent:** no git, no network, no GitHub token, and no write access to
+  `.git`. It never runs in the delivery process.
+- **Local commit:** made by Cycle Runner, with protected files and secrets
+  kept out (V1.3), and verified again at approval and at delivery.
+- **Approval:** a deliberate CLI act naming the SHA, recorded immutably.
+- **GitHub writes:** only in `github_delivery.py` (checked by
+  `test_boundaries.py`): five REST calls plus one `git push`, against the
+  configured repository only.
+
+### How to review and approve
+
+```bash
+uv run python -m cycle_runner.executor review WR-000007     # verified: ok / the problem; delivery: review_pending
+git -C ~/.local/share/cycle-runner/workspaces/WR-000007 show  # look at the change itself
+uv run python -m cycle_runner.executor approve WR-000007 --commit 1a2b3c4d5e6f
+op run --env-file .env.github -- uv run python -m cycle_runner.executor deliver WR-000007
+uv run python -m cycle_runner.executor reject WR-000007 --commit 1a2b3c4d5e6f --reason "wrong approach"
+```
+
+### Tests
+
+- **Offline** (in CI): the approval store (immutability, transitions,
+  eligibility, one live approval) and review/approve/reject. They cover:
+  - approval refusal for a missing workspace, a missing branch, a wrong HEAD,
+    an extra or amended commit, a remote, hostile config, a changed record,
+    protected files, secrets, a missing commit and a foreign author;
+  - delivery against a stand-in GitHub: a local bare repo plus a mocked REST
+    API;
+  - idempotency, push-then-PR failure and retry, auth, permission and push
+    failures;
+  - a remote branch at another commit, a base missing on GitHub, and a
+    changed configuration;
+  - the token never written or in argv, and the agent never given it;
+  - the CLI.
+- **Live** (`-m github`, `tests/test_github_live.py`): a real push and draft
+  PR on `silverbeer/cycle-runner-sandbox`, using the CLI end to end and
+  delivering twice.
+
+### Not in V1.4
+
+Approving from Telegram, Telegram execution, CI feedback, merging, marking
+PRs ready, Linear writes, retries, GitHub Apps, and delivering to MT.
+Delivery to MT needs `github = "silverbeer/missing-table"` in
+`projects.toml` and a token scoped to it. Do that deliberately, after the
+sandbox.
