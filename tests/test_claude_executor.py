@@ -595,3 +595,16 @@ def test_a_meaningless_report_is_never_a_success(workspace, summary, problem, fi
 
     assert result.outcome == "failed"  # neither changed nor no_change
     assert result.message.startswith("The coding agent's report can't be used:") and problem in result.message
+
+
+def test_the_summary_is_the_last_field_the_agent_writes(workspace):
+    # Found live: fields after a long summary got swallowed into it.
+    schema = _options(workspace).output_format["schema"]
+    assert list(schema["properties"]) == ["outcome", "tests_passed", "tests_command", "summary"]
+
+
+def test_a_summary_with_tool_call_markup_is_a_garbled_report(workspace):
+    garbled = SUMMARY + '</summary>\n<parameter name="tests_passed">true'
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, summary=garbled), ["src/hello.py"], transcript)
+    assert result.outcome == "failed" and "tool-call markup" in result.message

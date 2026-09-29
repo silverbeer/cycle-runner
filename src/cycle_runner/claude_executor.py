@@ -99,10 +99,14 @@ AGENT_LOGIN_VARIABLES = {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}  # the 
 class AgentReport(BaseModel):
     """What the agent must hand back (enforced by the SDK's structured output)."""
 
+    # Field order is the order the model writes them. summary is last on purpose:
+    # found live, a long summary sometimes swallowed the fields after it (the
+    # model wrote `</summary><parameter name="tests_passed">` into the string),
+    # and after retries it gave up or sent placeholders.
     outcome: Literal["completed", "no_change", "failed"]
-    summary: str
     tests_passed: bool
     tests_command: str
+    summary: str
 
 
 # A summary must say something: what changed (or why nothing needed to), what
@@ -116,11 +120,16 @@ PLACEHOLDER_SUMMARY = re.compile(
 )
 
 
+TOOL_MARKUP = re.compile(r"</?(parameter|invoke|summary)\b|<parameter name=", re.IGNORECASE)
+
+
 def report_problem(report: AgentReport, test_command: str | None) -> str | None:
     """Why this report can't be the record of the run, or None. The evidence is checked separately."""
     summary = " ".join(report.summary.split())
     if PLACEHOLDER_SUMMARY.match(summary):
         return f"its summary is a placeholder ({summary!r})"
+    if TOOL_MARKUP.search(summary):
+        return "its summary contains tool-call markup (a garbled report)"
     if len(summary) < MIN_SUMMARY_CHARACTERS or len(summary.split()) < MIN_SUMMARY_WORDS:
         return f"its summary is too short to say what was done ({summary!r})"
     if test_command is not None and " ".join(report.tests_command.split()) != test_command:
@@ -162,10 +171,11 @@ def build_prompt(task: ExecutionTask, workspace: ExecutionWorkspace) -> str:
         "Don't commit. Report outcome 'completed' if you changed code and the tests pass, "
         "'no_change' if you found nothing needs changing (e.g. it's already done) and the "
         "tests pass, and otherwise 'failed', saying why.\n\n"
-        "Finish by calling the StructuredOutput tool once with all four fields: outcome, "
-        "summary (plain text, at most about 1500 characters: what you changed, what the "
-        "tests showed, and anything left for a human), tests_passed, and tests_command "
-        "(exactly the command above). Never send placeholder values."
+        "Finish by calling the StructuredOutput tool once with all four fields, in this "
+        "order: outcome, tests_passed, tests_command (exactly the command above), and "
+        "summary: plain prose, at most about 1000 characters, without code, quotation "
+        "marks or markup, saying what you changed, what the tests showed, and anything "
+        "left for a human. Never send placeholder values."
     )
 
 

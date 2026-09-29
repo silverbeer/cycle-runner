@@ -419,8 +419,11 @@ def _review(store: WorkRequestStore, work_request_id: str) -> int:
         print(f"commit:    {delivery['commit']}")
         print(f"diff:      {_diff_line(diff)}; added {diff['files_added']}, "
               f"changed {diff['files_changed']}, deleted {diff['files_deleted']}")
-        for item in delivery.get("left_uncommitted", []):
+        left = delivery.get("left_uncommitted", [])
+        for item in left[:10]:
             print(f"  not committed: {item}")
+        if len(left) > 10:
+            print(f"  not committed: {len(left) - 10} more (all listed in {record_path.name})")
         print(f"inspect:   git -C {workspace} show --stat {delivery['commit'][:12]}")
         print("review:    pending. Nothing has been pushed; no PR exists.")
     return 0
