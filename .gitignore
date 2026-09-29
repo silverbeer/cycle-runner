@@ -15,6 +15,7 @@ wheels/
 # Local secrets (TELEGRAM_BOT_TOKEN etc.)
 .env
 .env.*
+!.env.github.example
 
 # Cycle Runner application state (local SQLite)
 data/
