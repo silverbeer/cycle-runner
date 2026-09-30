@@ -554,3 +554,19 @@ def test_a_decomposed_unicode_file_name_is_committed(store, workspace, precompos
     committed = subprocess.run(["git", "-C", str(workspace.path), "show", "--name-only", "-z", "--format=", "HEAD"],
                                capture_output=True, text=True).stdout.split("\0")
     assert unicodedata.normalize("NFC", "src/café.py") in [unicodedata.normalize("NFC", c) for c in committed]
+
+
+def test_new_empty_files_are_not_committed_but_emptied_tracked_files_are(store, workspace):
+    # Found live on MT (WR-000002): the agent "deleted" its scratch files by emptying them.
+    result = _the_agents_change(workspace)
+    _write(workspace, "tests/test_zzz_debug_dump.py", "")
+    _write(workspace, "README.md", "")  # an existing file made empty is a real change
+    result = result.model_copy(update={"files_changed": sorted(
+        [*result.files_changed, "tests/test_zzz_debug_dump.py", "README.md"])})
+
+    delivery = LocalGitDelivery(environ={}).deliver(_request(store), workspace, result)
+
+    committed = git(workspace, "show", "--name-only", "--format=", "HEAD").split()
+    assert "tests/test_zzz_debug_dump.py" not in committed and "README.md" in committed
+    assert "tests/test_zzz_debug_dump.py: a new empty file (how the agent discards scratch files)" in \
+        delivery.left_uncommitted

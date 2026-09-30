@@ -106,6 +106,11 @@ class AgentReport(BaseModel):
     outcome: Literal["completed", "no_change", "failed"]
     tests_passed: bool
     tests_command: str
+    # Files the agent created only for itself (probes, dumps). Found live on MT
+    # (WR-000002): it can't delete files, so it emptied them, and they were
+    # committed along with an unmentioned debug script. Listing a file here can
+    # only keep it out of the change, never add anything.
+    scratch_files: list[str] = []
     summary: str
 
 
@@ -171,11 +176,14 @@ def build_prompt(task: ExecutionTask, workspace: ExecutionWorkspace) -> str:
         "Don't commit. Report outcome 'completed' if you changed code and the tests pass, "
         "'no_change' if you found nothing needs changing (e.g. it's already done) and the "
         "tests pass, and otherwise 'failed', saying why.\n\n"
-        "Finish by calling the StructuredOutput tool once with all four fields, in this "
-        "order: outcome, tests_passed, tests_command (exactly the command above), and "
-        "summary: plain prose, at most about 1000 characters, without code, quotation "
-        "marks or markup, saying what you changed, what the tests showed, and anything "
-        "left for a human. Never send placeholder values."
+        "Don't create scratch files (probes, dumps, debug scripts). You can't delete files, "
+        "so if you had to create one anyway, list it in scratch_files: it will be left out "
+        "of the change. Every other file you create or edit becomes part of it.\n\n"
+        "Finish by calling the StructuredOutput tool once, with these fields in this "
+        "order: outcome, tests_passed, tests_command (exactly the command above), "
+        "scratch_files (a list, usually empty), and summary: plain prose, at most about "
+        "1000 characters, without code, quotation marks or markup, saying what you changed, "
+        "what the tests showed, and anything left for a human. Never send placeholder values."
     )
 
 
@@ -450,6 +458,11 @@ def to_execution_result(message: ResultMessage | None, files_changed: list[str],
         )
     details |= {"agent_outcome": report.outcome, "tests_passed": report.tests_passed,
                 "tests_command": report.tests_command, "summary": report.summary}
+    scratch = {os.path.normpath(path) for path in report.scratch_files if path}
+    if scratch:
+        # Only ever narrows the change: files the agent says aren't part of it.
+        details["scratch_files"] = sorted(scratch)
+        files_changed = [path for path in files_changed if os.path.normpath(path) not in scratch]
 
     def failed(text: str) -> ExecutionResult:
         return ExecutionResult(outcome="failed", message=text, files_changed=files_changed, details=details)
