@@ -126,11 +126,18 @@ PLACEHOLDER_SUMMARY = re.compile(
 
 
 TOOL_MARKUP = re.compile(r"</?(parameter|invoke|summary)\b|<parameter name=", re.IGNORECASE)
+# Found live: with summary last, the model sometimes appends its own closing tags
+# ("...passed.</summary>\n</invoke>"). Only at the very end, and carrying nothing.
+TRAILING_CLOSERS = re.compile(r"(\s*</(summary|parameter|invoke)>)+\s*$", re.IGNORECASE)
+
+
+def clean_summary(summary: str) -> str:
+    return TRAILING_CLOSERS.sub("", summary)
 
 
 def report_problem(report: AgentReport, test_command: str | None) -> str | None:
     """Why this report can't be the record of the run, or None. The evidence is checked separately."""
-    summary = " ".join(report.summary.split())
+    summary = " ".join(clean_summary(report.summary).split())
     if PLACEHOLDER_SUMMARY.match(summary):
         return f"its summary is a placeholder ({summary!r})"
     if TOOL_MARKUP.search(summary):
@@ -452,6 +459,7 @@ def to_execution_result(message: ResultMessage | None, files_changed: list[str],
         )
     try:
         report = AgentReport.model_validate(message.structured_output)
+        report = report.model_copy(update={"summary": clean_summary(report.summary)})
     except ValidationError:
         return ExecutionResult(
             outcome="failed", message="The coding agent's report didn't match the expected structure.", details=details

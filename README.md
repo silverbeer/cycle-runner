@@ -1888,6 +1888,10 @@ human approval, push and draft PR. The architecture is unchanged.
   - The prompt says so.
   - The human rejected WR-000002's commit, and the rerun was a new request,
     WR-000003.
+- **Closing tags leaked onto the end of a report are stripped.** A live test
+  run's report had every field right, then `</summary></invoke>` appended to
+  the summary. That's now dropped. Markup anywhere else in the summary is
+  still refused as a garbled report.
 - **`review` groups files left out of the commit by reason, byproducts
   last.** In the first run, about 360 pytest temporary files buried the three
   files that mattered.

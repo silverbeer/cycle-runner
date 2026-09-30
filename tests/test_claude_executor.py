@@ -642,3 +642,24 @@ def test_scratch_files_can_only_narrow_the_change(workspace):
 def test_the_prompt_explains_scratch_files(workspace, work_request_db):
     prompt = build_prompt(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
     assert "scratch_files" in prompt and "can't delete files" in prompt
+
+
+def test_closing_tags_leaked_onto_the_end_of_the_summary_are_dropped(workspace):
+    # Found live (V1.5a): every field right, then "</summary>\n</invoke>\n" appended.
+    leaked = SUMMARY + "</summary>\n</invoke>\n"
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+
+    result = to_execution_result(_result_for(workspace, summary=leaked), ["src/hello.py"], transcript)
+
+    assert result.outcome == "changed" and result.details["summary"] == SUMMARY
+    assert "</" not in result.message
+
+
+@pytest.mark.parametrize("garbled", [
+    SUMMARY + '</summary>\n<parameter name="tests_passed">true',  # swallowed a field: still refused
+    "Did the work.</summary> and then more text after the closing tag, which is not trailing at all",
+])
+def test_markup_anywhere_but_the_very_end_is_still_refused(workspace, garbled):
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, summary=garbled), ["src/hello.py"], transcript)
+    assert result.outcome == "failed" and "tool-call markup" in result.message
