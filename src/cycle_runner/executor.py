@@ -495,11 +495,15 @@ def _review(store: WorkRequestStore, work_request_id: str) -> int:
         print(f"commit:    {delivery['commit']}")
         print(f"diff:      {_diff_line(diff)}; added {diff['files_added']}, "
               f"changed {diff['files_changed']}, deleted {diff['files_deleted']}")
-        left = delivery.get("left_uncommitted", [])
-        for item in left[:10]:
-            print(f"  not committed: {item}")
-        if len(left) > 10:
-            print(f"  not committed: {len(left) - 10} more (all listed in the record)")
+        # Grouped by reason, test byproducts last: found live, ~360 pytest temp files
+        # buried the three scratch files that mattered.
+        by_reason: dict[str, list[str]] = {}
+        for item in delivery.get("left_uncommitted", []):
+            path, _, reason = item.partition(": ")
+            by_reason.setdefault(reason, []).append(path)
+        for reason, paths in sorted(by_reason.items(), key=lambda kv: ("byproduct" in kv[0], kv[0])):
+            shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+            print(f"  not committed ({len(paths)}, {reason}): {shown}")
         print(f"inspect:   git -C {current.workspace} show --stat {delivery['commit'][:12]}")
     print(f"verified:  {'ok, the local commit matches its record' if current.verified else current.problem}")
     for approval in current.approvals:

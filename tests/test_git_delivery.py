@@ -570,3 +570,23 @@ def test_new_empty_files_are_not_committed_but_emptied_tracked_files_are(store, 
     assert "tests/test_zzz_debug_dump.py" not in committed and "README.md" in committed
     assert "tests/test_zzz_debug_dump.py: a new empty file (how the agent discards scratch files)" in \
         delivery.left_uncommitted
+
+
+def test_review_groups_uncommitted_files_with_byproducts_last(store, projects_config, capsys):
+    from cycle_runner import executor as executor_module
+    from cycle_runner.projects import WorkspaceResolver, load_projects
+
+    class Busy(Agent):
+        def execute(self, task, ws):
+            for n in range(12):
+                _write(ws, f"pytest-of-x/tmp{n}.txt")
+            _write(ws, ".env", "X=1\n")
+            return super().execute(task, ws).model_copy(update={"files_changed": ["src/hello.py", ".env"]})
+
+    request = _request(store)
+    run_next(store, Busy(), WorkspaceResolver(load_projects()), deliverer=LocalGitDelivery(environ={}))
+    capsys.readouterr()
+    executor_module.main(["review", request.work_request_id])
+    lines = [line for line in capsys.readouterr().out.splitlines() if "not committed" in line]
+    assert lines[0].startswith("  not committed (1, a protected file") and ".env" in lines[0]
+    assert lines[-1].startswith("  not committed (12, not a change the executor saw") and "and 7 more" in lines[-1]
