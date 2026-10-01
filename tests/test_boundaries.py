@@ -233,7 +233,8 @@ def test_executors_get_the_task_not_linear():
 
 def test_the_issue_context_only_reads():
     imports = _imported_modules(PACKAGE / "issue_context.py")
-    assert imports == {"asyncio", "cycle_runner.executor", "cycle_runner.linear_client", "cycle_runner.work_requests"}
+    assert imports == {"asyncio", "dataclasses", "cycle_runner.executor", "cycle_runner.linear_client",
+                       "cycle_runner.work_requests"}
     source = (PACKAGE / "issue_context.py").read_text()
     for forbidden in ("mutation", "open_store", "WorkRequestStore", ".claim(", ".finish("):
         assert forbidden not in source, forbidden

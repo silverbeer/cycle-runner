@@ -14,6 +14,7 @@ running a production task on a guess.
 """
 
 import asyncio
+from dataclasses import dataclass
 
 from cycle_runner.executor import ExecutionTask, TaskContextError
 from cycle_runner.linear_client import LinearClient, LinearError
@@ -30,6 +31,7 @@ query ($id: String!) {
     title
     description
     labels { nodes { name parent { name } } }
+    cycle { number }
   }
 }
 """
@@ -45,6 +47,9 @@ class LinearIssueSource:
             return cls(LinearClient.from_env())
         except LinearError as exc:
             raise TaskContextError(str(exc)) from None
+
+    def describe(self, issue_id: str) -> "IssueSummary":
+        return describe_issue(self.client, issue_id)
 
     def task_for(self, request: WorkRequest) -> ExecutionTask:
         try:
@@ -69,6 +74,28 @@ class LinearIssueSource:
             description=description[:DESCRIPTION_LIMIT],
             rationale=request.rationale,
         )
+
+
+@dataclass(frozen=True)
+class IssueSummary:
+    """What a human needs to request work on an issue: read from Linear, not typed in."""
+
+    issue_id: str
+    title: str
+    project_id: str | None
+    cycle_number: int | None
+
+
+def describe_issue(client: LinearClient, issue_id: str) -> IssueSummary:
+    """The issue's title, project (its repo label) and cycle, read-only. TaskContextError if unreadable."""
+    try:
+        issue = asyncio.run(client.query(ISSUE, {"id": issue_id}))["issue"]
+    except LinearError as exc:
+        raise TaskContextError(f"couldn't read {issue_id} from Linear: {exc}") from None
+    if not issue or issue.get("identifier") != issue_id:
+        raise TaskContextError(f"Linear has no issue {issue_id}")
+    return IssueSummary(issue_id=issue_id, title=issue["title"], project_id=_project(issue),
+                        cycle_number=(issue.get("cycle") or {}).get("number"))
 
 
 def _project(issue: dict) -> str | None:

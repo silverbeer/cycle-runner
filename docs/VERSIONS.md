@@ -21,9 +21,10 @@ it does, how it was verified, and what it deliberately left out.
 | [V1.2](#v12) | Real project execution against MT | [SB-1182](https://linear.app/silverbeer/issue/SB-1182) | [#11](https://github.com/silverbeer/cycle-runner/pull/11) | 2026-09-28 |
 | [V1.3](#v13) | Local git delivery: the agent's work becomes a verified local commit | [SB-1183](https://linear.app/silverbeer/issue/SB-1183) | [#12](https://github.com/silverbeer/cycle-runner/pull/12) | 2026-09-28 |
 | [V1.4](#v14) | Human-approved GitHub delivery: an approved commit is pushed and opened as a draft PR (sandbox repo only) | [SB-1184](https://linear.app/silverbeer/issue/SB-1184) | [#13](https://github.com/silverbeer/cycle-runner/pull/13) | 2026-09-29 |
+| [V1.5a](#v15a) | Real MissingTable delivery: MT configured for GitHub, a `request` CLI for one named issue; live run delivered SB-866 as MT draft PR #658 | [SB-1186](https://linear.app/silverbeer/issue/SB-1186) | [#14](https://github.com/silverbeer/cycle-runner/pull/14) | — |
 
-What V1.4 left out — the candidates for what comes next — is listed under
-[Not in V1.4](#not-in-v14).
+What comes next is listed under
+[Deferred to V1.5b and later](#deferred-to-v15b-and-later).
 
 ## V0.3
 
@@ -1701,3 +1702,74 @@ PRs ready, Linear writes, retries, GitHub Apps, and delivering to MT.
 Delivery to MT needs `github = "silverbeer/missing-table"` in
 `projects.toml` and a token scoped to it. Do that deliberately, after the
 sandbox.
+
+## V1.5a
+
+One real MissingTable task delivered end to end with the V1.4 machinery:
+Linear issue, approved work request, fresh MT clone, Claude, local commit,
+human approval, push and draft PR. The architecture is unchanged.
+
+### What changed
+
+- **`projects.toml`:** MT has `github = "silverbeer/missing-table"`, with base
+  `main`. Its setup and test commands are unchanged. MTA, TRD and JT have no
+  `github` line and can't be delivered.
+- **`request SB-123 --confirm SB-123 --reason "..."`:** a human asks for work
+  on one named issue. It's the CLI counterpart of approving the bot's
+  recommendation, which picks the issue itself. The title, project (repo
+  label) and cycle come from Linear, read-only. It creates a pending work
+  request and starts nothing. It refuses:
+  - a mismatched confirmation or a blank reason;
+  - an unconfigured project;
+  - an issue that already has open work.
+- **Found in the live run, and fixed.** The agent can't delete files, so on
+  its first attempt (WR-000002) it emptied two scratch files. Both were
+  committed, along with an 18-line debug script its report didn't mention.
+  - The report now has `scratch_files`. These are removed from the change,
+    so the report can narrow a commit but never widen it.
+  - A new empty file is never committed.
+  - The prompt says so.
+  - The human rejected WR-000002's commit, and the rerun was a new request,
+    WR-000003.
+- **Closing tags leaked onto the end of a report are stripped.** A live test
+  run's report had every field right, then `</summary></invoke>` appended to
+  the summary. That's now dropped. Markup anywhere else in the summary is
+  still refused as a garbled report.
+- **`review` groups files left out of the commit by reason, byproducts
+  last.** In the first run, about 360 pytest temporary files buried the three
+  files that mattered.
+
+### Token
+
+The same fine-grained token (`.env.github`, used only by `deliver`) covers
+exactly `silverbeer/cycle-runner-sandbox` and `silverbeer/missing-table`. It
+has Contents read/write and Pull requests read/write, nothing else. Claude
+never receives it.
+
+### Live result (2026-09-30)
+
+| | |
+|---|---|
+| Work request | WR-000003 (new; WR-000002's commit was rejected and kept on record) |
+| Issue | SB-866, `mt team matches`: add `--age-group` and an Age column |
+| Claude | `changed`: 50 turns, $1.50, 5 test runs observed, report accepted first try |
+| Tests | MT unit suite in the sandbox: 1351 passed, 12 skipped |
+| Commit | `976e780e5827`, one Cycle Runner commit on MT `main` at `7f4f117`; 2 files, +94 −6 |
+| Approval | APR-000002, `approve --commit 976e780e5827` |
+| GitHub | `silverbeer/missing-table` branch `cycle-runner/WR-000003` at `976e780e…`; **draft PR #658** against `main` |
+| Retry | Running `deliver` again gave the same PR and no push |
+| MT checkout | HEAD, branch, status and stash identical before and after |
+
+Reviewer's note: the change includes a module-level `console.width = 120`
+when output isn't a terminal. That affects every `mt` command when piped,
+not only `team matches`. It was approved knowingly.
+
+### Deferred to V1.5b and later
+
+- **The clone's base is the local checkout's `main`,** which may lag GitHub
+  (PR #658 is 21 commits behind). Delivery only requires the base to be
+  somewhere on GitHub's `main`. Fetching the latest base first would avoid
+  this.
+- **Scratch files the agent doesn't list** are caught only by human review.
+- **CI results on the PR**, Telegram notifications or approval, and cleanup
+  of old workspaces.

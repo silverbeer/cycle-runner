@@ -24,6 +24,8 @@
 #                 unreadable in the sandbox)
 #   test_success_pattern optional: a regex the agent's last test run output must
 #                 match (checked by the executor, not taken from the agent)
+#   github        optional: owner/name of the GitHub repository an approved
+#                 delivery is pushed to (V1.4); needs branch (the PR's base)
 #
 # Runnable by the Claude executor: MT (V1.2). The others still need their
 # dependencies set up the same way before an agent can run their tests.
@@ -33,6 +35,10 @@ workspace_root = "~/.local/share/cycle-runner/workspaces"
 [projects.MT]    # missing-table
 repository = "~/gitrepos/missing-table"
 branch = "main"
+# V1.5a: an approved delivery goes here as a draft PR against main. The token
+# (CYCLE_RUNNER_GITHUB_TOKEN, .env.github) needs this repository with
+# Contents read/write and Pull requests read/write; nothing else.
+github = "silverbeer/missing-table"
 # A workspace-local interpreter (.python) and venv (backend/.venv), so the
 # sandboxed tests never need ~/.local/share/uv or ~/.cache.
 setup_command = "env UV_PYTHON_INSTALL_DIR=.python UV_PYTHON_PREFERENCE=only-managed uv sync --directory backend --frozen"

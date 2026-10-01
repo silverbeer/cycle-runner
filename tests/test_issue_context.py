@@ -128,3 +128,17 @@ def test_the_executor_gets_the_description(store, fixed_workspace):
     assert done.status == "completed"
     assert received[0].description == DESCRIPTION
 
+
+
+def test_describe_reads_title_project_and_cycle(store):
+    issue = {**_issue(), "cycle": {"number": 10}}
+    summary = LinearIssueSource(StubLinear(issue)).describe("DEMO-640")
+    assert (summary.issue_id, summary.title, summary.project_id, summary.cycle_number) == \
+        ("DEMO-640", "Weak admin password and no rate limiting", "DEMO", 10)
+
+
+@pytest.mark.parametrize("linear", [StubLinear(error=LinearError("down")), StubLinear(None),
+                                    StubLinear(_issue(identifier="DEMO-1"))])
+def test_describe_fails_safely(linear):
+    with pytest.raises(TaskContextError):
+        LinearIssueSource(linear).describe("DEMO-640")

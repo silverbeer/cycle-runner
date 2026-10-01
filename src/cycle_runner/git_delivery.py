@@ -271,7 +271,7 @@ class LocalGitDelivery:
             seen.add(_nfc(path))
             if code[0] not in " ?":
                 raise DeliveryError(f"the index was changed outside Cycle Runner ({path})")
-            reason = self._excluded(root, path, deleted=code[1] == "D", attributed=attributed)
+            reason = self._excluded(root, path, deleted=code[1] == "D", attributed=attributed, new=code == "??")
             if reason:
                 left.append(f"{path}: {reason}")
             else:
@@ -280,7 +280,8 @@ class LocalGitDelivery:
             left.append(f"{path}: ignored by the project's .gitignore")
         return include, left
 
-    def _excluded(self, root: Path, path: str, *, deleted: bool, attributed: set[str]) -> str | None:
+    def _excluded(self, root: Path, path: str, *, deleted: bool, attributed: set[str],
+                  new: bool = False) -> str | None:
         reason = protected_reason(path)
         if reason:
             return reason
@@ -296,6 +297,9 @@ class LocalGitDelivery:
             return "outside the workspace"
         if not resolved.is_file():
             return "not a regular file"
+        if new and resolved.stat().st_size == 0:
+            # Found live (WR-000002): the agent can't delete files, so it empties them.
+            return "a new empty file (how the agent discards scratch files)"
         if resolved.stat().st_size > MAX_FILE_BYTES:
             return f"larger than {MAX_FILE_BYTES} bytes"
         content = resolved.read_bytes()

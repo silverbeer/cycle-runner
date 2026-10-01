@@ -5,9 +5,9 @@ A learning project for Google's [Agent Development Kit](https://adk.dev) (ADK).
 One agent, `cycle_runner`, talks through a local model served by Ollama. It
 acts as Product Owner / Scrum Master for a weekly engineering cycle.
 
-It is built one small version at a time. The current version is **V1.4**: a
-commit made by the coding agent, once a person approves it, is pushed to GitHub
-and opened as a draft PR. [docs/VERSIONS.md](docs/VERSIONS.md) lists every
+It is built one small version at a time. The current version is **V1.5a**:
+one real MissingTable issue delivered end to end, from Linear issue to a draft
+PR that a person approved. [docs/VERSIONS.md](docs/VERSIONS.md) lists every
 version with its Linear ticket, its PR and full notes.
 
 ```

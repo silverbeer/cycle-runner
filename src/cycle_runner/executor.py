@@ -5,6 +5,8 @@
     uv run python -m cycle_runner.executor release WR-000001
     uv run python -m cycle_runner.executor abandon WR-000001 --reason "..."
     uv run python -m cycle_runner.executor backfill-project WR-000001 MT
+    op run --env-file .env -- uv run python -m cycle_runner.executor request SB-866 --confirm SB-866 \
+        --reason "why this issue, now"                      # a human's explicit request for one issue
     uv run python -m cycle_runner.executor review WR-000002    # what a run left for a human to inspect
     uv run python -m cycle_runner.executor approve WR-000002 --commit 1a2b3c4   # that exact commit, for GitHub
     uv run python -m cycle_runner.executor reject WR-000002 --commit 1a2b3c4 --reason "..."
@@ -43,7 +45,9 @@ import getpass
 import json
 import logging
 import os
+import re
 import socket
+from datetime import UTC, datetime
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -317,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     backfill.add_argument("work_request_id")
     backfill.add_argument("project_id")
+    request = commands.add_parser(
+        "request", help="explicitly request work on one Linear issue: a new pending work request (reads Linear)")
+    request.add_argument("issue_id")
+    request.add_argument("--confirm", required=True, help="the same issue id again: this is the approval")
+    request.add_argument("--reason", required=True, help="why this issue (recorded as the rationale)")
     review = commands.add_parser("review", help="show what a finished run left for human review")
     review.add_argument("work_request_id")
     approve = commands.add_parser("approve", help="approve one exact local commit for GitHub delivery")
@@ -345,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "release":
             print(_describe(store.release(args.work_request_id)))
             return 0
+        if args.command == "request":
+            return _request(store, args.issue_id, args.confirm, args.reason)
         if args.command == "review":
             return _review(store, args.work_request_id)
         if args.command in ("approve", "reject", "deliver"):
@@ -409,6 +420,50 @@ def _run(store: WorkRequestStore, work_request_id: str | None, kind: str, max_tu
     return 0 if request.status == "completed" else 1
 
 
+def _request(store: WorkRequestStore, issue_id: str, confirm: str, reason: str) -> int:
+    """A human's explicit request for one named issue: the CLI counterpart of approving in Telegram.
+
+    The issue's title, project and cycle come from Linear (read-only), never
+    from the command line. It creates a pending work request and starts
+    nothing; running it is a separate, deliberate step.
+    """
+    import uuid
+
+    from cycle_runner.issue_context import LinearIssueSource
+    from cycle_runner.projects import ProjectConfigError, load_projects
+
+    if confirm != issue_id or not re.fullmatch(r"[A-Z][A-Z0-9]*-\d+", issue_id):
+        print(f"error: --confirm must repeat the issue id exactly ({issue_id})", file=sys.stderr)
+        return 2
+    if not reason.strip():
+        print("error: --reason must say why", file=sys.stderr)
+        return 2
+    open_requests = [r for r in store.list_all()
+                     if r.issue_id == issue_id and r.status in ("pending", "claimed", "running")]
+    if open_requests:
+        print(f"error: {issue_id} already has {open_requests[0].work_request_id} ({open_requests[0].status})",
+              file=sys.stderr)
+        return 2
+    try:
+        issue = LinearIssueSource.from_env().describe(issue_id)
+        config = load_projects()
+    except (TaskContextError, ProjectConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if issue.project_id is None or issue.project_id not in config.projects:
+        print(f"error: {issue_id}'s project {issue.project_id!r} (its repo label) isn't configured", file=sys.stderr)
+        return 2
+    request, _ = store.create_for_approval(
+        recommendation_id=f"cli-{issue_id}-{uuid.uuid4().hex[:12]}", issue_id=issue_id,
+        approved_by=f"cli:{getpass.getuser()}@{socket.gethostname()}", approved_at=datetime.now(UTC),
+        cycle_number=issue.cycle_number or 0, title_at_approval=issue.title, rationale=reason.strip(),
+        project_id=issue.project_id,
+    )
+    print(f"{request.work_request_id} {issue_id} pending: {issue.title} (project {issue.project_id}). "
+          "Nothing started.")
+    return 0
+
+
 def _review(store: WorkRequestStore, work_request_id: str) -> int:
     """The human review point: the run, its local commit (verified again), and its delivery state."""
     from cycle_runner.delivery_approval import ApprovalRefused, review
@@ -440,11 +495,15 @@ def _review(store: WorkRequestStore, work_request_id: str) -> int:
         print(f"commit:    {delivery['commit']}")
         print(f"diff:      {_diff_line(diff)}; added {diff['files_added']}, "
               f"changed {diff['files_changed']}, deleted {diff['files_deleted']}")
-        left = delivery.get("left_uncommitted", [])
-        for item in left[:10]:
-            print(f"  not committed: {item}")
-        if len(left) > 10:
-            print(f"  not committed: {len(left) - 10} more (all listed in the record)")
+        # Grouped by reason, test byproducts last: found live, ~360 pytest temp files
+        # buried the three scratch files that mattered.
+        by_reason: dict[str, list[str]] = {}
+        for item in delivery.get("left_uncommitted", []):
+            path, _, reason = item.partition(": ")
+            by_reason.setdefault(reason, []).append(path)
+        for reason, paths in sorted(by_reason.items(), key=lambda kv: ("byproduct" in kv[0], kv[0])):
+            shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+            print(f"  not committed ({len(paths)}, {reason}): {shown}")
         print(f"inspect:   git -C {current.workspace} show --stat {delivery['commit'][:12]}")
     print(f"verified:  {'ok, the local commit matches its record' if current.verified else current.problem}")
     for approval in current.approvals:

@@ -509,7 +509,7 @@ def test_a_placeholder_report_is_not_accepted(workspace):
 
 def test_the_prompt_says_how_to_report(workspace, work_request_db):
     prompt = build_prompt(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
-    assert "StructuredOutput tool once with all four fields" in prompt and "placeholder" in prompt
+    assert "StructuredOutput tool once, with these fields in this order" in prompt and "placeholder" in prompt
 
 
 def test_the_agents_state_is_kept_beside_the_workspace_not_under_the_home_directory(workspace, work_request_db,
@@ -600,11 +600,66 @@ def test_a_meaningless_report_is_never_a_success(workspace, summary, problem, fi
 def test_the_summary_is_the_last_field_the_agent_writes(workspace):
     # Found live: fields after a long summary got swallowed into it.
     schema = _options(workspace).output_format["schema"]
-    assert list(schema["properties"]) == ["outcome", "tests_passed", "tests_command", "summary"]
+    assert list(schema["properties"]) == ["outcome", "tests_passed", "tests_command", "scratch_files", "summary"]
 
 
 def test_a_summary_with_tool_call_markup_is_a_garbled_report(workspace):
     garbled = SUMMARY + '</summary>\n<parameter name="tests_passed">true'
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, summary=garbled), ["src/hello.py"], transcript)
+    assert result.outcome == "failed" and "tool-call markup" in result.message
+
+
+# --- V1.5a: scratch files (found live on MT, WR-000002) ------------------------------------------
+
+
+def test_scratch_files_the_agent_names_are_left_out_of_the_change(workspace):
+    transcript = _observed(workspace, _tool_call("w", "Write", file_path="tests/zzz_debug.py"),
+                           _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(
+        _result_for(workspace, scratch_files=["tests/zzz_debug.py", "./tests/_dump.txt"]),
+        ["src/hello.py", "tests/_dump.txt", "tests/zzz_debug.py"], transcript,
+    )
+    assert (result.outcome, result.files_changed) == ("changed", ["src/hello.py"])
+    assert result.details["scratch_files"] == ["tests/_dump.txt", "tests/zzz_debug.py"]
+
+
+def test_naming_everything_as_scratch_leaves_no_change(workspace):
+    transcript = _observed(workspace, _tool_call("w", "Write", file_path="tests/zzz_debug.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, scratch_files=["tests/zzz_debug.py"]),
+                                 ["tests/zzz_debug.py"], transcript)
+    assert result.outcome == "no_change"
+
+
+def test_scratch_files_can_only_narrow_the_change(workspace):
+    # Naming files that didn't change adds nothing.
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+    result = to_execution_result(_result_for(workspace, scratch_files=["README.md", "/etc/passwd"]),
+                                 ["src/hello.py"], transcript)
+    assert result.files_changed == ["src/hello.py"]
+
+
+def test_the_prompt_explains_scratch_files(workspace, work_request_db):
+    prompt = build_prompt(task_from_approval(_request(WorkRequestStore(work_request_db))), workspace)
+    assert "scratch_files" in prompt and "can't delete files" in prompt
+
+
+def test_closing_tags_leaked_onto_the_end_of_the_summary_are_dropped(workspace):
+    # Found live (V1.5a): every field right, then "</summary>\n</invoke>\n" appended.
+    leaked = SUMMARY + "</summary>\n</invoke>\n"
+    transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
+
+    result = to_execution_result(_result_for(workspace, summary=leaked), ["src/hello.py"], transcript)
+
+    assert result.outcome == "changed" and result.details["summary"] == SUMMARY
+    assert "</" not in result.message
+
+
+@pytest.mark.parametrize("garbled", [
+    SUMMARY + '</summary>\n<parameter name="tests_passed">true',  # swallowed a field: still refused
+    "Did the work.</summary> and then more text after the closing tag, which is not trailing at all",
+])
+def test_markup_anywhere_but_the_very_end_is_still_refused(workspace, garbled):
     transcript = _observed(workspace, _tool_call("e", "Edit", file_path="src/hello.py"), *_test_run(workspace))
     result = to_execution_result(_result_for(workspace, summary=garbled), ["src/hello.py"], transcript)
     assert result.outcome == "failed" and "tool-call markup" in result.message
