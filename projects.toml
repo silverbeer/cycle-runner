@@ -25,7 +25,10 @@
 #   test_success_pattern optional: a regex the agent's last test run output must
 #                 match (checked by the executor, not taken from the agent)
 #   github        optional: owner/name of the GitHub repository an approved
-#                 delivery is pushed to (V1.4); needs branch (the PR's base)
+#                 delivery is pushed to (V1.4); needs branch (the PR's base).
+#                 The clone then starts from GitHub's branch, fetched with your
+#                 own git credentials, not the checkout's copy, which may lag
+#                 (V1.5b). If the fetch fails, the request fails unstarted.
 #
 # Runnable by the Claude executor: MT (V1.2). The others still need their
 # dependencies set up the same way before an agent can run their tests.

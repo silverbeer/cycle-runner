@@ -22,9 +22,10 @@ it does, how it was verified, and what it deliberately left out.
 | [V1.3](#v13) | Local git delivery: the agent's work becomes a verified local commit | [SB-1183](https://linear.app/silverbeer/issue/SB-1183) | [#12](https://github.com/silverbeer/cycle-runner/pull/12) | 2026-09-28 |
 | [V1.4](#v14) | Human-approved GitHub delivery: an approved commit is pushed and opened as a draft PR (sandbox repo only) | [SB-1184](https://linear.app/silverbeer/issue/SB-1184) | [#13](https://github.com/silverbeer/cycle-runner/pull/13) | 2026-09-29 |
 | [V1.5a](#v15a) | Real MissingTable delivery: MT configured for GitHub, a `request` CLI for one named issue; live run delivered SB-866 as MT draft PR #658 | [SB-1186](https://linear.app/silverbeer/issue/SB-1186) | [#14](https://github.com/silverbeer/cycle-runner/pull/14) | — |
+| [V1.5b](#v15b) | In progress. A delivering project's clone starts from GitHub's latest base, not the local checkout's | [SB-1208](https://linear.app/silverbeer/issue/SB-1208) | — | — |
 
 What comes next is listed under
-[Deferred to V1.5b and later](#deferred-to-v15b-and-later).
+[Deferred to V1.5b and later](#deferred-to-v15b-and-later), and [V1.5b](#v15b) tracks it.
 
 ## V0.3
 
@@ -1773,3 +1774,30 @@ not only `team matches`. It was approved knowingly.
 - **Scratch files the agent doesn't list** are caught only by human review.
 - **CI results on the PR**, Telegram notifications or approval, and cleanup
   of old workspaces.
+
+## V1.5b
+
+In progress. V1.5a's deferred list, one item at a time.
+
+### The latest base from GitHub (SB-1208)
+
+In V1.5a the clone started from the local checkout's `main`, so MT PR #658
+started 21 commits behind GitHub. Now, for a project with `github`, the
+resolver fetches the configured branch from GitHub into the clone and resets
+to it before setup and the agent run:
+
+- only the clone changes; the real checkout is still only read;
+- the fetch uses your own git credentials (osxkeychain for the private
+  sandbox), never the delivery token;
+- it leaves no remote, `FETCH_HEAD` or extra ref for delivery's checks to
+  find;
+- unpushed commits in the checkout are not the base: GitHub's branch is,
+  because that's what the PR merges into;
+- a failed fetch fails the request unstarted, rather than starting the agent
+  on a stale base.
+
+Live check (2026-10-02): local MT `main` was at `323b997`, GitHub's at
+`184bc4c`; the workspace started at `184bc4c` with no remotes.
+
+Still deferred: scratch files the agent doesn't list, CI results on the PR,
+Telegram notifications or approval, and cleanup of old workspaces.

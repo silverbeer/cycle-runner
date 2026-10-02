@@ -333,9 +333,25 @@ def test_only_github_delivery_can_push_or_talk_to_github():
         source = path.read_text()
         if path.name == "github_delivery.py":
             continue
-        assert "api.github.com" not in source and "github.com/{" not in source, path.name
+        assert "api.github.com" not in source, path.name
+        if path.name != "projects.py":  # it fetches a delivering project's base: test_projects_only_reads_from_github
+            assert "github.com/{" not in source, path.name
         assert '"push"' not in source, path.name
     assert _git_operations("github_delivery.py") == {"init", "fetch", "rev-parse", "rev-list", "push"}
+
+
+def test_projects_only_reads_from_github():
+    """V1.5b (SB-1208): the clone starts from GitHub's base. A fetch, with the user's own git credentials; nothing more."""
+    source = (PACKAGE / "projects.py").read_text()
+    commands = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_git":
+            words = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+            commands.add(next(w for w in words if w != "-C"))
+    assert commands == {"clone", "remote", "fetch", "reset", "rev-parse"}
+    assert not {"httpx", "cycle_runner.github_delivery"} & _imported_modules(PACKAGE / "projects.py")
+    for credential in ("CYCLE_RUNNER_GITHUB_TOKEN", "extraheader", "AUTHORIZATION:", "x-access-token"):
+        assert credential not in source, credential  # never the delivery token, or a way to send one
 
 
 def test_github_delivery_knows_nothing_about_claude_linear_or_the_conversation():
