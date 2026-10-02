@@ -394,3 +394,108 @@ def test_the_success_pattern_reaches_the_executor(tmp_path, store):
             f"test_command = \"pytest\"\ntest_success_pattern = '^OK$'\n")
     workspace = WorkspaceResolver(load_projects(_write_config(tmp_path, body))).resolve(_request(store, "MT"))
     assert workspace.test_success_pattern == "^OK$"
+
+
+# --- the latest base from GitHub (SB-1208) -------------------------------------------
+
+
+def _git(path, *args):
+    return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _commit(path, name, text):
+    (path / name).write_text(text)
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", f"add {name}")
+    return _git(path, "rev-parse", "HEAD")
+
+
+def _github_project(tmp_path):
+    """A checkout, and a stand-in GitHub (a bare repository) cloned from it."""
+    repo = make_repo(tmp_path / "repos" / "mt")
+    github = tmp_path / "github.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(repo.path), str(github)], check=True)
+    body = (f'workspace_root = "{tmp_path / "w"}"\n[projects.MT]\nrepository = "{repo.path}"\n'
+            f'test_command = "pytest"\nbranch = "main"\ngithub = "silverbeer/mt"\n')
+    return load_projects(_write_config(tmp_path, body)), repo.path, github
+
+
+def _merged_on_github(tmp_path, github, name):
+    """Someone else's PR lands on GitHub's main; the local checkout doesn't pull it."""
+    other = tmp_path / f"other-{name}"
+    subprocess.run(["git", "clone", "-q", str(github), str(other)], check=True)
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "Other")
+    sha = _commit(other, name, "merged on GitHub\n")
+    _git(other, "push", "-q", "origin", "main")
+    return sha
+
+
+def test_a_stale_checkout_still_gives_the_agent_githubs_latest_base(tmp_path, store):
+    config, checkout, github = _github_project(tmp_path)
+    tip = _merged_on_github(tmp_path, github, "landed.txt")
+    untouched = _tree_hash(checkout)
+    asked = []
+
+    def upstream(repository):
+        asked.append(repository)
+        return str(github)
+
+    workspace = WorkspaceResolver(config, upstream_url=upstream).resolve(_request(store, "MT"))
+
+    assert asked == ["silverbeer/mt"]
+    assert _git(workspace.path, "rev-parse", "HEAD") == tip
+    assert _git(workspace.path, "rev-parse", "refs/heads/main") == tip
+    assert _git(workspace.path, "branch", "--show-current") == "main"
+    assert (workspace.path / "landed.txt").read_text() == "merged on GitHub\n"
+    assert _git(workspace.path, "status", "--porcelain") == ""
+    assert _tree_hash(checkout) == untouched  # the real checkout is only read
+
+
+def test_the_fetch_leaves_no_remote_or_fetch_head_behind(tmp_path, store):
+    config, _, github = _github_project(tmp_path)
+    _merged_on_github(tmp_path, github, "landed.txt")
+
+    workspace = WorkspaceResolver(config, upstream_url=lambda _: str(github)).resolve(_request(store, "MT"))
+
+    assert _git(workspace.path, "remote") == ""
+    assert not (workspace.path / ".git" / "FETCH_HEAD").exists()
+    assert _git(workspace.path, "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+
+
+def test_unpushed_commits_in_the_checkout_are_not_the_base(tmp_path, store):
+    config, checkout, github = _github_project(tmp_path)
+    on_github = _git(github, "rev-parse", "refs/heads/main")
+    _commit(checkout, "local-only.txt", "never pushed\n")
+
+    workspace = WorkspaceResolver(config, upstream_url=lambda _: str(github)).resolve(_request(store, "MT"))
+
+    assert _git(workspace.path, "rev-parse", "HEAD") == on_github
+    assert not (workspace.path / "local-only.txt").exists()
+
+
+def test_a_base_that_cannot_be_fetched_fails_the_request_before_the_executor_runs(tmp_path, store):
+    config, _, _ = _github_project(tmp_path)
+    request = _request(store, "MT")
+    spy = Spy()
+
+    failed = run_next(store, spy, WorkspaceResolver(config, upstream_url=lambda _: str(tmp_path / "missing.git")))
+
+    assert spy.calls == []
+    assert failed.work_request_id == request.work_request_id
+    assert failed.status == "failed" and failed.started_at is None
+    assert failed.result_message.startswith("Not started:") and "git fetch failed" in failed.result_message
+
+
+def test_a_project_without_github_never_fetches(tmp_path, store):
+    repo = make_repo(tmp_path / "repos" / "mt")
+    body = (f'workspace_root = "{tmp_path / "w"}"\n[projects.MT]\nrepository = "{repo.path}"\n'
+            f'test_command = "pytest"\nbranch = "main"\n')
+
+    def upstream(_):
+        raise AssertionError("fetched without a github repository")
+
+    workspace = WorkspaceResolver(load_projects(_write_config(tmp_path, body)), upstream_url=upstream).resolve(
+        _request(store, "MT"))
+
+    assert _git(workspace.path, "rev-parse", "HEAD") == _git(repo.path, "rev-parse", "main")

@@ -107,7 +107,8 @@ def setup(tmp_path, work_request_db, monkeypatch):
         cycle_number=1, title_at_approval="Add a greet(name) function", rationale="r", project_id="DEMO",
     )
     config = load_projects()
-    done, _ = run_request(store, Agent(), WorkspaceResolver(config), request.work_request_id,
+    resolver = WorkspaceResolver(config, upstream_url=lambda _: str(bare))  # the stand-in GitHub
+    done, _ = run_request(store, Agent(), resolver, request.work_request_id,
                           deliverer=LocalGitDelivery(environ={}))
     assert (done.outcome, done.branch) == ("changed", "cycle-runner/WR-000001")
     github = FakeGitHub(bare)

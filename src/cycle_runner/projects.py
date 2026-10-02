@@ -12,6 +12,12 @@ The workspace is always a fresh clone of the configured repository (its
 configured branch), made for one work request, with its origin remote
 removed. The real checkout is only read, never changed.
 
+A project that delivers to GitHub (github = "owner/name") starts from
+GitHub's branch, not the checkout's: the checkout's copy may lag (V1.5a's
+first MT PR started 21 commits behind). The clone fetches the branch from
+GitHub with the user's own git credentials and resets to it; a fetch that
+fails fails the request, rather than starting the agent on a stale base.
+
 Setup (optional setup_command) prepares the clone's dependencies before the
 coding agent starts, e.g. `uv sync`. It runs here, outside the agent's
 sandbox and with network access, because installing needs both; the agent
@@ -35,6 +41,7 @@ import shlex
 import subprocess
 import tomllib
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
@@ -237,11 +244,16 @@ def load_projects(path: str | Path | None = None) -> ProjectsConfig:
         raise ProjectConfigError(f"{path}: {problems}") from None
 
 
+def github_url(repository: str) -> str:
+    return f"https://github.com/{repository}.git"
+
+
 class WorkspaceResolver:
     """Turns a work request into a fresh, validated ExecutionWorkspace for its project."""
 
-    def __init__(self, config: ProjectsConfig):
+    def __init__(self, config: ProjectsConfig, upstream_url: Callable[[str], str] = github_url):
         self.config = config
+        self.upstream_url = upstream_url  # owner/name -> where the base branch is fetched from (a seam for tests)
 
     def resolve(self, request: WorkRequest) -> ExecutionWorkspace:
         wr = request.work_request_id
@@ -262,6 +274,8 @@ class WorkspaceResolver:
         branch = ["--branch", project.branch] if project.branch else []
         self._git("clone", "--quiet", "--no-hardlinks", *branch, str(repository), str(workspace))
         self._git("-C", str(workspace), "remote", "remove", "origin")  # nowhere to push to
+        if project.github:
+            self._latest_base(project, workspace)
         if project.setup_command:
             self._setup(project, workspace)
 
@@ -269,6 +283,22 @@ class WorkspaceResolver:
             path=workspace, test_command=project.test_command, readable=project.readable,
             test_success_pattern=project.test_success_pattern,
         )
+
+    def _latest_base(self, project: ProjectConfig, workspace: Path) -> None:
+        """Move the clone's branch to GitHub's tip of it, so the agent starts where a PR will merge.
+
+        Only the clone changes. --update-head-ok lets the fetch move the
+        checked-out branch, and the reset brings the files along. No remote,
+        FETCH_HEAD or extra ref is left behind for delivery's checks to find.
+        """
+        git = ("-C", str(workspace))
+        before = self._git(*git, "rev-parse", "HEAD")
+        self._git(*git, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--update-head-ok",
+                  self.upstream_url(project.github), f"+refs/heads/{project.branch}:refs/heads/{project.branch}")
+        self._git(*git, "reset", "--quiet", "--hard", f"refs/heads/{project.branch}")
+        after = self._git(*git, "rev-parse", "HEAD")
+        if after != before:
+            log.info("%s: %s on GitHub is %s; the checkout had %s", workspace.name, project.branch, after[:12], before[:12])
 
     @staticmethod
     def _setup(project: ProjectConfig, workspace: Path) -> None:
@@ -300,10 +330,12 @@ class WorkspaceResolver:
                 raise WorkspaceError(f"setup failed: {produced} resolves outside the workspace ({path})")
 
     @staticmethod
-    def _git(*args: str) -> None:
+    def _git(*args: str) -> str:
         result = subprocess.run(
             ["git", *args], capture_output=True, text=True, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         )
         if result.returncode != 0:
             detail = (result.stderr.strip().splitlines() or ["unknown error"])[-1]
-            raise WorkspaceError(f"git {args[0]} failed: {detail}")
+            command = args[2] if args[0] == "-C" else args[0]
+            raise WorkspaceError(f"git {command} failed: {detail}")
+        return result.stdout.strip()
