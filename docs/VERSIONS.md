@@ -1891,5 +1891,25 @@ can't compete with a bot that polls.
 - **"Waiting on you" from Cycle Runner's own work requests:** the work-request
   database lives on the Mac, not in the cluster, so the k3s standup shows only
   the Linear side until V2.0 moves the runner.
-- **A smaller image:** it's 1.35 GB, because it carries the ADK, LiteLLM and
-  Agent SDK dependencies the standup doesn't use.
+
+### Image diet (SB-1216)
+
+The image went from **1.35 GB to 90 MB**. It had been installing everything,
+and the standup imports only `httpx`, `pydantic` and `telegram`.
+
+- **`pyproject.toml`:** the core `dependencies` are now just those three. ADK
+  and LiteLLM are the `agent` group, and the Claude Agent SDK (217 MB on its
+  own) is the `executor` group. `[tool.uv] default-groups` keeps installing
+  all of them for `uv run` and in CI, so nothing changes locally.
+- **`Dockerfile`:** `uv sync --no-default-groups`, two stages on
+  `python:3.14-alpine`. `uv` (43 MB) stays in the build stage.
+- **`image.yml`:** fails the build if the image goes over a **150 MB budget**.
+
+| Step | Size |
+|---|---|
+| Before (Debian slim, all dependencies) | 1.35 GB |
+| Core dependencies only | 252 MB |
+| Two stages, Alpine | **90 MB** |
+
+Checked in k3s with the real Secret, as non-root on a read-only root
+filesystem: the standup rendered from live Linear data.

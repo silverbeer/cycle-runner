@@ -7,10 +7,12 @@ authors = [
     { name = "silverbeer", email = "silverbeer.io@gmail.com" }
 ]
 requires-python = ">=3.14"
+# Core: what the scheduled jobs (the standup) import. Kept small, because the
+# k3s image installs only this (SB-1216). The heavy parts are dependency
+# groups below, installed by default everywhere else.
 dependencies = [
-    "claude-agent-sdk>=0.2.160",
-    "google-adk>=2.10.0",
-    "litellm>=1.102.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
     "python-telegram-bot>=22.8",
 ]
 
@@ -22,6 +24,20 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
 ]
+# The conversation: ADK and LiteLLM (to Ollama).
+agent = [
+    "google-adk>=2.10.0",
+    "litellm>=1.102.1",
+]
+# The coding executor: a real Claude coding agent.
+executor = [
+    "claude-agent-sdk>=0.2.160",
+]
+
+[tool.uv]
+# `uv run` and `uv sync` keep installing everything locally and in CI; the
+# Dockerfile opts out with --no-default-groups.
+default-groups = ["dev", "agent", "executor"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
