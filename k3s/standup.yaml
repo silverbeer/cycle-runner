@@ -1,0 +1,71 @@
+# The daily standup (V1.6, SB-1211): weekdays 08:00 Eastern, one Telegram message.
+#
+#   kubectl apply -f k3s/standup.yaml
+#   bash k3s/provision-secret.sh          # once, and after any credential change
+#
+# Read-only and model-free: it reads Linear as the "Cycle Runner" app (scope
+# read) and sends with the bot's sendMessage. It never calls getUpdates, so it
+# can't compete with any bot that polls Telegram.
+#
+# The image follows main (:main, pulled every run). A daily read-only job is
+# easy to roll back by reverting the commit; nothing it does needs pinning yet.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cycle-runner-adk
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: standup
+  namespace: cycle-runner-adk
+spec:
+  schedule: "0 8 * * 1-5"
+  timeZone: America/New_York
+  concurrencyPolicy: Forbid
+  # If the node was down at 08:00, still send it within the hour; later than that it's stale.
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          containers:
+            - name: standup
+              image: ghcr.io/silverbeer/cycle-runner-adk:main
+              imagePullPolicy: Always
+              args: ["cycle_runner.standup", "--send"]
+              envFrom:
+                - secretRef:
+                    name: cycle-runner-adk
+              env:
+                - name: LINEAR_TEAM_KEY
+                  value: SB
+                - name: HOME
+                  value: /tmp
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                # The node is 2 vCPU and nearly fully requested (SB-981): ask for little.
+                requests:
+                  cpu: 10m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+          volumes:
+            - name: tmp
+              emptyDir: {}

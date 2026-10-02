@@ -23,6 +23,7 @@ it does, how it was verified, and what it deliberately left out.
 | [V1.4](#v14) | Human-approved GitHub delivery: an approved commit is pushed and opened as a draft PR (sandbox repo only) | [SB-1184](https://linear.app/silverbeer/issue/SB-1184) | [#13](https://github.com/silverbeer/cycle-runner/pull/13) | 2026-09-29 |
 | [V1.5a](#v15a) | Real MissingTable delivery: MT configured for GitHub, a `request` CLI for one named issue; live run delivered SB-866 as MT draft PR #658 | [SB-1186](https://linear.app/silverbeer/issue/SB-1186) | [#14](https://github.com/silverbeer/cycle-runner/pull/14) | — |
 | [V1.5b](#v15b) | In progress. A delivering project's clone starts from GitHub's latest base, not the local checkout's | [SB-1208](https://linear.app/silverbeer/issue/SB-1208) | — | — |
+| [V1.6](#v16) | Daily standup to Telegram, weekdays 08:00 ET from k3s. Plain code, no model | [SB-1211](https://linear.app/silverbeer/issue/SB-1211) | — | — |
 
 ## Roadmap: replacing the k3s agents
 
@@ -1820,3 +1821,75 @@ Live check (2026-10-02): local MT `main` was at `323b997`, GitHub's at
 
 Still deferred: scratch files the agent doesn't list, CI results on the PR,
 Telegram notifications or approval, and cleanup of old workspaces.
+
+## V1.6
+
+The daily standup (SB-1211), replacing SB-1088 on the k3s track. It's a
+query plus formatting, so no model is involved and it costs no tokens.
+
+```
+☀️ Standup · Fri 2 Oct
+Cycle 10 · day 6 of 7 · 2 days left
+▓▓▓▓▓░░░░░ 54% · 153 of 291 pts
+
+🚨 Needs attention
+• 10 issues stuck in progress; oldest SB-35, 132 days
+• 3 items waiting on you over 2 days; longest SB-990, 20 days
+• 1 blocked
+
+✅ Done since yesterday · 21 issues · 60 pts     every issue, with its points
+🔨 In progress · 3                                every issue, days in progress
+🐢 Stuck in progress (>7 days) · 10               oldest first
+⛔ Blocked · 1                                    open "blocks" relations; failed Cycle Runner runs
+⏳ Waiting on you · 3                             gate:* labels and Cycle Runner commits, longest wait first
+```
+
+- **Nothing is cut off.** Every item is listed with its full title. A long
+  standup is sent as several messages, split between lines (`split_lines`),
+  never in the middle of an item.
+- **Time is the point.** Anything in progress for more than 7 days is listed
+  as stuck, not as progress. Waiting on you is measured from when the gate
+  label was added (from the issue's history), or from when a Cycle Runner run
+  finished, and is marked 🔴 after 2 days. The top block names the oldest
+  stuck item and the longest wait, so they're read first.
+- **Done and in progress are team-wide**, because adhoc work often has no
+  cycle. Cycle numbers come from the active cycle (canceled work isn't
+  counted).
+- **"Done since"** runs from midnight Eastern on the previous working day,
+  so Monday covers Friday and the weekend.
+- **Every issue id is a link.** File names in titles are shown as `code` so
+  Telegram doesn't turn `VERSIONS.md` into a web link.
+- **Failures aren't hidden:** if Linear can't be read, nothing is sent and
+  the job fails, rather than sending a standup with holes.
+
+### Run the standup
+
+```bash
+op run --env-file .env -- uv run python -m cycle_runner.standup          # print
+op run --env-file .env -- uv run python -m cycle_runner.standup --send   # send
+```
+
+### The standup in k3s
+
+`k3s/standup.yaml`: namespace `cycle-runner-adk`, CronJob `standup` at
+`0 8 * * 1-5` America/New_York. It runs as a non-root user with a read-only
+root filesystem, no service-account token, and requests of 10m CPU and 128Mi.
+The image is `ghcr.io/silverbeer/cycle-runner-adk:main`, built for arm64 by
+`.github/workflows/image.yml` on every change to the code, and also tagged
+`:sha-<commit>` for rollback.
+
+```bash
+kubectl apply -f k3s/standup.yaml
+bash k3s/provision-secret.sh     # .env -> Secret over stdin, via op run; prints no values
+```
+
+The Secret holds the Linear app's client id and secret, the Telegram bot
+token and the allowed user ids. The job never calls `getUpdates`, so it
+can't compete with a bot that polls.
+
+**Not in V1.6:**
+- **"Waiting on you" from Cycle Runner's own work requests:** the work-request
+  database lives on the Mac, not in the cluster, so the k3s standup shows only
+  the Linear side until V2.0 moves the runner.
+- **A smaller image:** it's 1.35 GB, because it carries the ADK, LiteLLM and
+  Agent SDK dependencies the standup doesn't use.

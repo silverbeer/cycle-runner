@@ -18,7 +18,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from telegram import Update
+from telegram import Bot, LinkPreviewOptions, Update
 from telegram.constants import ChatAction, MessageLimit, ParseMode
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -140,6 +140,51 @@ class TelegramAdapter:
             f"Sorry, you're not allowed to use this bot. Your Telegram user id is {user.id}."
         )
         return True
+
+
+def split_lines(text: str, limit: int = MessageLimit.MAX_TEXT_LENGTH) -> list[str]:
+    """Split HTML whose lines are each self-contained into messages under the limit, only between lines.
+
+    A blank line (a paragraph break) is preferred as the place to split, so a
+    heading stays with its items when it can. A single line over the limit
+    falls back to split_message.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    for paragraph in text.split("\n\n"):
+        candidate = "\n\n".join([*current, paragraph]) if current else paragraph
+        if len(candidate) <= limit:
+            current.append(paragraph)
+            continue
+        if current:
+            chunks.append("\n\n".join(current))
+            current = []
+        if len(paragraph) <= limit:
+            current = [paragraph]
+            continue
+        lines: list[str] = []
+        for line in paragraph.split("\n"):
+            if lines and len("\n".join([*lines, line])) > limit:
+                chunks.append("\n".join(lines))
+                lines = []
+            if len(line) > limit:
+                chunks.extend(split_message(line, limit))
+            else:
+                lines.append(line)
+        if lines:
+            current = ["\n".join(lines)]
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks
+
+
+async def send_html(bot_token: str, chat_ids: list[int], text: str) -> None:
+    """Send a message, already in Telegram's HTML subset, to each chat; split between lines when long."""
+    async with Bot(bot_token) as bot:
+        for chat_id in chat_ids:
+            for chunk in split_lines(text):
+                await bot.send_message(chat_id, chunk, parse_mode=ParseMode.HTML,
+                                       link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 async def _log_telegram_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

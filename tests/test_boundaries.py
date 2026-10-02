@@ -114,7 +114,18 @@ def test_only_approval_and_the_executor_can_reach_the_work_request_store():
         and any(name.startswith("cycle_runner.work_requests") for name in _imported_modules(path))
     ]
     assert sorted(users) == ["approval.py", "delivery_approval.py", "executor.py", "git_delivery.py",
-                             "github_delivery.py", "issue_context.py", "projects.py"]
+                             "github_delivery.py", "issue_context.py", "projects.py", "standup.py"]
+
+
+def test_the_standup_only_reads_the_store_and_uses_no_model():
+    """V1.6: a query plus formatting. It may read work requests, never change them, and never call a model."""
+    source = (PACKAGE / "standup.py").read_text()
+    for forbidden in (".claim(", ".start(", ".finish(", ".fail_to_start(", ".release(", ".abandon(", "approve_",
+                      "reject_", "mark_", "invalidate_", "record_", "create_for_approval", "backfill_"):
+        assert forbidden not in source, forbidden
+    imports = _imported_modules(PACKAGE / "standup.py")
+    assert not [n for n in imports if n.startswith(("google", "litellm", "claude_agent_sdk", "cycle_runner.agent",
+                                                    "cycle_runner.gateway", "httpx", "subprocess"))], imports
 
 
 @pytest.mark.parametrize(
