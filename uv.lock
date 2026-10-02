@@ -424,27 +424,37 @@ name = "cycle-runner"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "claude-agent-sdk" },
-    { name = "google-adk" },
-    { name = "litellm" },
+    { name = "httpx" },
+    { name = "pydantic" },
     { name = "python-telegram-bot" },
 ]
 
 [package.dev-dependencies]
+agent = [
+    { name = "google-adk" },
+    { name = "litellm" },
+]
 dev = [
     { name = "pytest" },
+]
+executor = [
+    { name = "claude-agent-sdk" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "claude-agent-sdk", specifier = ">=0.2.160" },
-    { name = "google-adk", specifier = ">=2.10.0" },
-    { name = "litellm", specifier = ">=1.102.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pydantic", specifier = ">=2.13.5" },
     { name = "python-telegram-bot", specifier = ">=22.8" },
 ]
 
 [package.metadata.requires-dev]
+agent = [
+    { name = "google-adk", specifier = ">=2.10.0" },
+    { name = "litellm", specifier = ">=1.102.1" },
+]
 dev = [{ name = "pytest", specifier = ">=9.1.1" }]
+executor = [{ name = "claude-agent-sdk", specifier = ">=0.2.160" }]
 
 [[package]]
 name = "distro"

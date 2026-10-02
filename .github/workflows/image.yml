@@ -37,10 +37,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Smoke test
+      - name: Smoke test and size budget
         run: |
           docker buildx build --load -t smoke .
           docker run --rm smoke cycle_runner.standup --help
+          # SB-1216: 1.35 GB before, ~90 MB after. Fail rather than regrow quietly.
+          budget_mb=150
+          size_mb=$(( $(docker image inspect smoke --format '{{.Size}}') / 1000000 ))
+          echo "image size: ${size_mb} MB (budget ${budget_mb} MB)"
+          [ "$size_mb" -le "$budget_mb" ] || { echo "::error::image is ${size_mb} MB, over the ${budget_mb} MB budget"; exit 1; }
       - uses: docker/build-push-action@v6
         with:
           context: .
