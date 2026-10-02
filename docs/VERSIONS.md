@@ -24,8 +24,27 @@ it does, how it was verified, and what it deliberately left out.
 | [V1.5a](#v15a) | Real MissingTable delivery: MT configured for GitHub, a `request` CLI for one named issue; live run delivered SB-866 as MT draft PR #658 | [SB-1186](https://linear.app/silverbeer/issue/SB-1186) | [#14](https://github.com/silverbeer/cycle-runner/pull/14) | — |
 | [V1.5b](#v15b) | In progress. A delivering project's clone starts from GitHub's latest base, not the local checkout's | [SB-1208](https://linear.app/silverbeer/issue/SB-1208) | — | — |
 
-What comes next is listed under
-[Deferred to V1.5b and later](#deferred-to-v15b-and-later), and [V1.5b](#v15b) tracks it.
+## Roadmap: replacing the k3s agents
+
+Decided 2026-10-02: Cycle Runner replaces the dotfiles/k3s agent stack
+(`cronjob/cycle-runner`, `gatekeeper-listener`, `po-chat` in namespace
+`cycle-runner`). That stack gets bug fixes only from now on. Each of its
+workloads is retired once its replacement has run reliably.
+
+**Cost rule:** anything that is a query plus formatting is plain code, with
+no model and no tokens. A model is used only where judgment is needed, and
+then the local Ollama model first. Claude is used only for the coding
+executor.
+
+| Version | What | Replaces | Ticket |
+|---|---|---|---|
+| V1.5b | Catch scratch files the agent doesn't list | — | [SB-1209](https://linear.app/silverbeer/issue/SB-1209) |
+| V1.5b | Clean up old workspaces | — | [SB-1210](https://linear.app/silverbeer/issue/SB-1210) |
+| V1.6 | Daily standup to Telegram, no LLM | SB-1088 | [SB-1211](https://linear.app/silverbeer/issue/SB-1211) |
+| V1.7 | Approve delivery from Telegram | `gatekeeper-listener` | [SB-1212](https://linear.app/silverbeer/issue/SB-1212) |
+| V1.8 | Linear writes as the "Cycle Runner" app | the personal API key | [SB-1213](https://linear.app/silverbeer/issue/SB-1213) |
+| V1.9 | CI results on the PR, merge on green | `/work-headless` merging | [SB-1214](https://linear.app/silverbeer/issue/SB-1214) |
+| V2.0 | Run in k3s on a schedule; retire the old stack | `cronjob/cycle-runner`, `po-chat` | [SB-1215](https://linear.app/silverbeer/issue/SB-1215) |
 
 ## V0.3
 
