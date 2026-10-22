@@ -1,0 +1,76 @@
+╭──────────────────────────────────────────────────────────────────────────────────╮
+│ Scrum Master · TEST   generated 2030-01-10 10:00 EST · data 2030-01-10 10:00 EST │
+│ repos: acme/app                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────╯
+One line per finding; run a section command (cycle, aging, epics, prs, branches) or use --format markdown for evidence 
+and next steps.
+Cycle 5  2030-01-06 → 2030-01-12                            
+┌───────────────────────────┬──────────────────────────────┐
+│ days                      │ 4 elapsed · 3 left           │
+│ done (by count)           │ 1 / 5 · 20%                  │
+│ points                    │ not reported (4/5 estimated) │
+│ in progress · not started │ 2 · 2                        │
+│ blocked · aging           │ 1 · 1                        │
+│ added after start         │ 1                            │
+│ carried in                │ 1                            │
+│ carryover risk            │ —                            │
+└───────────────────────────┴──────────────────────────────┘
+  medium   TEST-4 Payments API credentials — unassigned (ISSUE-UNASSIGNED)
+  medium   TEST-4 Payments API credentials — not started, untouched 12 days (CYCLE-UNTOUCHED)
+  low      cycle 5 carry-in 1 of 1 issues carried in are still open (CYCLE-CARRIED-IN)
+────────────────────────────────────────────────── Top actions today ───────────────────────────────────────────────────
+ 1. critical TEST-3 Wire payments to the new API — blocked
+    → Start TEST-4 first.  (ISSUE-BLOCKED: in-progress work stalled, Linear priority High)
+ 2. critical acme/app#12 Flaky test fix — checks failure
+    → Fix the build; nothing merges until it's green.  (PR-CHECKS-FAILED: failing 48h on a High-priority issue)
+ 3. high TEST-2 Fix the flaky checkout test — in progress, untouched 9 days
+    → Resume it today, or move it back to Todo so in-progress means in progress.  (ISSUE-INACTIVE: in cycle 5)
+────────────────────────────────────────────────── Aging and inactive ──────────────────────────────────────────────────
+  high     TEST-2 Fix the flaky checkout test — in progress, untouched 9 days (ISSUE-INACTIVE)
+  low      backlog 2 open issues untouched 30+ days (BACKLOG-STALE)
+In the cycle or in progress                                                          
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━┳━━━━━━┳━━━━━━━━━┓
+┃ issue                               ┃ state       ┃ prio   ┃ age ┃ idle ┃ in prog ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━╇━━━━━━╇━━━━━━━━━┩
+│ TEST-2 Fix the flaky checkout test  │ In Progress │ High   │ 20d │ 9d   │ 20d     │
+│ TEST-3 Wire payments to the new API │ In Progress │ High   │ 1d  │ 1d   │ 1d      │
+│ TEST-4 Payments API credentials     │ Todo        │ Medium │ 12d │ 12d  │ —       │
+│ TEST-5 Release notes                │ Todo        │ Medium │ 2d  │ 2d   │ —       │
+└─────────────────────────────────────┴─────────────┴────────┴─────┴──────┴─────────┘
+───────────────────────────────────────────────── Blockers and overdue ─────────────────────────────────────────────────
+  critical TEST-3 Wire payments to the new API — blocked (ISSUE-BLOCKED)
+  high     TEST-5 Release notes — overdue 1 days (ISSUE-OVERDUE)
+─────────────────────────────────────────────── Epics and parent issues ────────────────────────────────────────────────
+  medium   TEST-8 Search — all 1 sub-issues done, parent open (EPIC-PARENT-OPEN-CHILDREN-DONE)
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃ epic          ┃ kind    ┃ status  ┃ done/total ┃ open ┃ blocked ┃ outside cycle ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ Epic p1       │ project │ Started │ 1/2        │ 1    │ 1       │ 0             │
+│ Epic p2       │ project │ Planned │ 1/3        │ 2    │ 0       │ 2             │
+│ TEST-8 Search │ parent  │ Todo    │ 1/1        │ 0    │ 0       │ 0             │
+└───────────────┴─────────┴─────────┴────────────┴──────┴─────────┴───────────────┘
+────────────────────────────────────────────────── Open pull requests ──────────────────────────────────────────────────
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━┳━━━━━━┳━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┳━━━━━━━━┓
+┃ PR                                 ┃ age ┃ idle ┃ review ┃ checks  ┃ merge   ┃ behind ┃ linear ┃
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━╇━━━━━━╇━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━╇━━━━━━━━┩
+│ acme/app#11 Payments client        │ 16d │ 1d   │ none   │ success │ unknown │ ?      │ TEST-3 │
+│ acme/app#12 Flaky test fix         │ 3d  │ 2d   │ none   │ failure │ unknown │ ?      │ TEST-2 │
+│ acme/app#13 Spike: GraphQL (draft) │ 30d │ 20d  │ none   │ none    │ unknown │ ?      │ —      │
+└────────────────────────────────────┴─────┴──────┴────────┴─────────┴─────────┴────────┴────────┘
+  critical acme/app#12 Flaky test fix — checks failure (PR-CHECKS-FAILED)
+  medium   acme/app#11 Payments client — open 16 days (PR-OLD)
+  low      acme/app#13 Spike: GraphQL — draft, untouched 20 days (PR-DRAFT-STALE)
+  low      acme/app#13 Spike: GraphQL — no Linear issue (PR-UNLINKED)
+────────────────────────────── Branch cleanup (recommendations only; nothing is deleted) ───────────────────────────────
+  acme/app: 1 candidates, 1 to review
+    $ git push origin --delete old-feature   # from a checkout of acme/app
+    review experiment no PR, 4 commits ahead → Open a PR for it, or confirm the work is abandoned before deleting.
+  acme/app (local /src/app): 1 candidates, 1 to review
+    $ git -C /src/app branch -d old-feature
+    review hotfix upstream deleted, not merged → Check `git -C /src/app log origin/main..hotfix`; if it landed, `git 
+branch -D` it.
+───────────────────────────────────────────────────── Data quality ─────────────────────────────────────────────────────
+  linear  complete 
+  github  complete 
+  git     complete 
+  • linear: only 4 of 5 cycle issues have estimates; points are not reported

@@ -1,0 +1,622 @@
+{
+  "schema_version": 1,
+  "generated_at": "2030-01-10T15:00:00Z",
+  "collected_at": "2030-01-10T15:00:00Z",
+  "timezone": "America/New_York",
+  "scope": {
+    "team": "TEST",
+    "repos": [
+      "acme/app"
+    ],
+    "cycle": null
+  },
+  "complete": true,
+  "sources": [
+    {
+      "name": "linear",
+      "ok": true,
+      "complete": true,
+      "error": null,
+      "notes": []
+    },
+    {
+      "name": "github",
+      "ok": true,
+      "complete": true,
+      "error": null,
+      "notes": []
+    },
+    {
+      "name": "git",
+      "ok": true,
+      "complete": true,
+      "error": null,
+      "notes": []
+    }
+  ],
+  "cycle": {
+    "number": 5,
+    "name": null,
+    "starts_on": "2030-01-06",
+    "ends_on": "2030-01-12",
+    "days_elapsed": 4,
+    "days_remaining": 3,
+    "total": 5,
+    "excluded": 0,
+    "completed": 1,
+    "completion_by_count": 20,
+    "in_progress": 2,
+    "unstarted": 2,
+    "blocked": 1,
+    "aging_or_inactive": 1,
+    "estimates_present": 4,
+    "points_total": null,
+    "points_completed": null,
+    "added_after_start": [
+      "TEST-5"
+    ],
+    "carried_in": [
+      "TEST-2"
+    ],
+    "carryover_risk": []
+  },
+  "top_actions": [
+    {
+      "rule": "ISSUE-BLOCKED",
+      "severity": "critical",
+      "severity_reason": "in-progress work stalled, Linear priority High",
+      "section": "blockers",
+      "subject": "TEST-3",
+      "title": "Wire payments to the new API — blocked",
+      "url": "https://linear.app/t/issue/TEST-3",
+      "source_priority": "High",
+      "evidence": [
+        "state: In Progress",
+        "in cycle 5",
+        "blocked by TEST-4 (Todo)"
+      ],
+      "action": "Start TEST-4 first.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 1
+    },
+    {
+      "rule": "PR-CHECKS-FAILED",
+      "severity": "critical",
+      "severity_reason": "failing 48h on a High-priority issue",
+      "section": "prs",
+      "subject": "acme/app#12",
+      "title": "Flaky test fix — checks failure",
+      "url": "https://github.com/acme/app/pull/12",
+      "source_priority": "High (TEST-2)",
+      "evidence": [
+        "last commit 48h before collection",
+        "linked: TEST-2"
+      ],
+      "action": "Fix the build; nothing merges until it's green.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 3
+    },
+    {
+      "rule": "ISSUE-INACTIVE",
+      "severity": "high",
+      "severity_reason": "in cycle 5",
+      "section": "aging",
+      "subject": "TEST-2",
+      "title": "Fix the flaky checkout test — in progress, untouched 9 days",
+      "url": "https://linear.app/t/issue/TEST-2",
+      "source_priority": "High",
+      "evidence": [
+        "state: In Progress",
+        "last update 2030-01-01 (9 days)",
+        "in progress 20 days",
+        "in cycle 5"
+      ],
+      "action": "Resume it today, or move it back to Todo so in-progress means in progress.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 20
+    }
+  ],
+  "findings": [
+    {
+      "rule": "ISSUE-BLOCKED",
+      "severity": "critical",
+      "severity_reason": "in-progress work stalled, Linear priority High",
+      "section": "blockers",
+      "subject": "TEST-3",
+      "title": "Wire payments to the new API — blocked",
+      "url": "https://linear.app/t/issue/TEST-3",
+      "source_priority": "High",
+      "evidence": [
+        "state: In Progress",
+        "in cycle 5",
+        "blocked by TEST-4 (Todo)"
+      ],
+      "action": "Start TEST-4 first.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 1
+    },
+    {
+      "rule": "PR-CHECKS-FAILED",
+      "severity": "critical",
+      "severity_reason": "failing 48h on a High-priority issue",
+      "section": "prs",
+      "subject": "acme/app#12",
+      "title": "Flaky test fix — checks failure",
+      "url": "https://github.com/acme/app/pull/12",
+      "source_priority": "High (TEST-2)",
+      "evidence": [
+        "last commit 48h before collection",
+        "linked: TEST-2"
+      ],
+      "action": "Fix the build; nothing merges until it's green.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 3
+    },
+    {
+      "rule": "ISSUE-INACTIVE",
+      "severity": "high",
+      "severity_reason": "in cycle 5",
+      "section": "aging",
+      "subject": "TEST-2",
+      "title": "Fix the flaky checkout test — in progress, untouched 9 days",
+      "url": "https://linear.app/t/issue/TEST-2",
+      "source_priority": "High",
+      "evidence": [
+        "state: In Progress",
+        "last update 2030-01-01 (9 days)",
+        "in progress 20 days",
+        "in cycle 5"
+      ],
+      "action": "Resume it today, or move it back to Todo so in-progress means in progress.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 20
+    },
+    {
+      "rule": "ISSUE-OVERDUE",
+      "severity": "high",
+      "severity_reason": "in cycle 5",
+      "section": "blockers",
+      "subject": "TEST-5",
+      "title": "Release notes — overdue 1 days",
+      "url": "https://linear.app/t/issue/TEST-5",
+      "source_priority": "Medium",
+      "evidence": [
+        "state: Todo",
+        "due 2030-01-09",
+        "in cycle 5"
+      ],
+      "action": "Finish it, or move the due date to an honest one.",
+      "group": null,
+      "rank_priority": 3,
+      "rank_age": 2
+    },
+    {
+      "rule": "PR-OLD",
+      "severity": "medium",
+      "severity_reason": "open 14+ days, still active",
+      "section": "prs",
+      "subject": "acme/app#11",
+      "title": "Payments client — open 16 days",
+      "url": "https://github.com/acme/app/pull/11",
+      "source_priority": "High (TEST-3)",
+      "evidence": [
+        "last activity 1 days ago",
+        "linked: TEST-3"
+      ],
+      "action": "Old but moving: check what's holding the merge.",
+      "group": null,
+      "rank_priority": 2,
+      "rank_age": 16
+    },
+    {
+      "rule": "ISSUE-UNASSIGNED",
+      "severity": "medium",
+      "severity_reason": "cycle work with no owner",
+      "section": "cycle",
+      "subject": "TEST-4",
+      "title": "Payments API credentials — unassigned",
+      "url": "https://linear.app/t/issue/TEST-4",
+      "source_priority": "Medium",
+      "evidence": [
+        "state: Todo",
+        "in cycle 5"
+      ],
+      "action": "Assign an owner, or take it out of the cycle.",
+      "group": null,
+      "rank_priority": 3,
+      "rank_age": 12
+    },
+    {
+      "rule": "CYCLE-UNTOUCHED",
+      "severity": "medium",
+      "severity_reason": "planned work with no change in 7+ days",
+      "section": "cycle",
+      "subject": "TEST-4",
+      "title": "Payments API credentials — not started, untouched 12 days",
+      "url": "https://linear.app/t/issue/TEST-4",
+      "source_priority": "Medium",
+      "evidence": [
+        "state: Todo",
+        "in cycle 5",
+        "last update 2029-12-29"
+      ],
+      "action": "Start it or move it out of the cycle.",
+      "group": null,
+      "rank_priority": 3,
+      "rank_age": 12
+    },
+    {
+      "rule": "EPIC-PARENT-OPEN-CHILDREN-DONE",
+      "severity": "medium",
+      "severity_reason": "unclear epic completion",
+      "section": "epics",
+      "subject": "TEST-8",
+      "title": "Search — all 1 sub-issues done, parent open",
+      "url": "https://linear.app/t/issue/TEST-8",
+      "source_priority": "Medium",
+      "evidence": [
+        "state: Todo",
+        "1 done"
+      ],
+      "action": "Close the parent, or add what's left.",
+      "group": null,
+      "rank_priority": 3,
+      "rank_age": 50
+    },
+    {
+      "rule": "PR-DRAFT-STALE",
+      "severity": "low",
+      "severity_reason": "draft untouched 14+ days",
+      "section": "prs",
+      "subject": "acme/app#13",
+      "title": "Spike: GraphQL — draft, untouched 20 days",
+      "url": "https://github.com/acme/app/pull/13",
+      "source_priority": null,
+      "evidence": [
+        "open 30 days",
+        "linked: none"
+      ],
+      "action": "Finish it or close it; a parked draft hides its branch from cleanup.",
+      "group": null,
+      "rank_priority": 5,
+      "rank_age": 30
+    },
+    {
+      "rule": "PR-UNLINKED",
+      "severity": "low",
+      "severity_reason": "no TEST-N in branch, title or body",
+      "section": "prs",
+      "subject": "acme/app#13",
+      "title": "Spike: GraphQL — no Linear issue",
+      "url": "https://github.com/acme/app/pull/13",
+      "source_priority": null,
+      "evidence": [
+        "branch feature-13",
+        "linked: none"
+      ],
+      "action": "Add `Fixes TEST-N` to the PR body so Linear tracks it.",
+      "group": null,
+      "rank_priority": 5,
+      "rank_age": 30
+    },
+    {
+      "rule": "CYCLE-CARRIED-IN",
+      "severity": "low",
+      "severity_reason": "informational: repeated carryover is a planning signal",
+      "section": "cycle",
+      "subject": "cycle 5 carry-in",
+      "title": "1 of 1 issues carried in are still open",
+      "url": null,
+      "source_priority": null,
+      "evidence": [
+        "carried in from cycle 4: TEST-2"
+      ],
+      "action": "At planning, size the next cycle for this carryover or move these back to the backlog.",
+      "group": null,
+      "rank_priority": 5,
+      "rank_age": 0
+    },
+    {
+      "rule": "BACKLOG-STALE",
+      "severity": "low",
+      "severity_reason": "backlog hygiene",
+      "section": "aging",
+      "subject": "backlog",
+      "title": "2 open issues untouched 30+ days",
+      "url": null,
+      "source_priority": null,
+      "evidence": [
+        "oldest: TEST-6 (60d), TEST-8 (50d)"
+      ],
+      "action": "Groom: cancel what you won't do, so the backlog stays a list of real options.",
+      "group": null,
+      "rank_priority": 5,
+      "rank_age": 60
+    },
+    {
+      "rule": "BRANCH-REMOTE-MERGED",
+      "severity": "low",
+      "severity_reason": "cleanup candidate",
+      "section": "branches",
+      "subject": "acme/app:old-feature",
+      "title": "merged via #9",
+      "url": "https://github.com/acme/app/tree/old-feature",
+      "source_priority": null,
+      "evidence": [
+        "remote branch",
+        "last commit 30 days ago",
+        "no open PR",
+        "PR #9 merged 2029-12-11"
+      ],
+      "action": "After checking, delete on GitHub or `git push origin --delete old-feature`.",
+      "group": "acme/app",
+      "rank_priority": 5,
+      "rank_age": 30
+    },
+    {
+      "rule": "BRANCH-REMOTE-NO-PR",
+      "severity": "low",
+      "severity_reason": "needs human review",
+      "section": "branches",
+      "subject": "acme/app:experiment",
+      "title": "no PR, 4 commits ahead",
+      "url": "https://github.com/acme/app/tree/experiment",
+      "source_priority": null,
+      "evidence": [
+        "remote branch",
+        "last commit 30 days ago",
+        "no open PR",
+        "4 commits not in main"
+      ],
+      "action": "Open a PR for it, or confirm the work is abandoned before deleting.",
+      "group": "acme/app",
+      "rank_priority": 5,
+      "rank_age": 30
+    },
+    {
+      "rule": "BRANCH-LOCAL-MERGED",
+      "severity": "low",
+      "severity_reason": "cleanup candidate",
+      "section": "branches",
+      "subject": "acme/app:local:old-feature",
+      "title": "merged into origin/main",
+      "url": null,
+      "source_priority": null,
+      "evidence": [
+        "local branch in /src/app",
+        "last commit 30 days ago",
+        "not checked out",
+        "merged into origin/main (last fetch 1 days ago)"
+      ],
+      "action": "`git -C /src/app branch -d old-feature` (refuses if not merged).",
+      "group": "acme/app (local /src/app)",
+      "rank_priority": 5,
+      "rank_age": 30
+    },
+    {
+      "rule": "BRANCH-LOCAL-GONE",
+      "severity": "low",
+      "severity_reason": "needs human review",
+      "section": "branches",
+      "subject": "acme/app:local:hotfix",
+      "title": "upstream deleted, not merged",
+      "url": null,
+      "source_priority": null,
+      "evidence": [
+        "local branch in /src/app",
+        "last commit 30 days ago",
+        "not checked out",
+        "upstream origin/hotfix is gone",
+        "not an ancestor of the default branch (squash merge?)"
+      ],
+      "action": "Check `git -C /src/app log origin/main..hotfix`; if it landed, `git branch -D` it.",
+      "group": "acme/app (local /src/app)",
+      "rank_priority": 5,
+      "rank_age": 30
+    }
+  ],
+  "aging": [
+    {
+      "identifier": "TEST-2",
+      "title": "Fix the flaky checkout test",
+      "url": "https://linear.app/t/issue/TEST-2",
+      "state_name": "In Progress",
+      "state_type": "started",
+      "priority_label": "High",
+      "assignee": "me",
+      "age_days": 20,
+      "age_bucket": 14,
+      "inactive_days": 9,
+      "in_progress_days": 20,
+      "in_cycle": true
+    },
+    {
+      "identifier": "TEST-3",
+      "title": "Wire payments to the new API",
+      "url": "https://linear.app/t/issue/TEST-3",
+      "state_name": "In Progress",
+      "state_type": "started",
+      "priority_label": "High",
+      "assignee": "me",
+      "age_days": 1,
+      "age_bucket": null,
+      "inactive_days": 1,
+      "in_progress_days": 1,
+      "in_cycle": true
+    },
+    {
+      "identifier": "TEST-4",
+      "title": "Payments API credentials",
+      "url": "https://linear.app/t/issue/TEST-4",
+      "state_name": "Todo",
+      "state_type": "unstarted",
+      "priority_label": "Medium",
+      "assignee": null,
+      "age_days": 12,
+      "age_bucket": 7,
+      "inactive_days": 12,
+      "in_progress_days": null,
+      "in_cycle": true
+    },
+    {
+      "identifier": "TEST-5",
+      "title": "Release notes",
+      "url": "https://linear.app/t/issue/TEST-5",
+      "state_name": "Todo",
+      "state_type": "unstarted",
+      "priority_label": "Medium",
+      "assignee": "me",
+      "age_days": 2,
+      "age_bucket": null,
+      "inactive_days": 2,
+      "in_progress_days": null,
+      "in_cycle": true
+    },
+    {
+      "identifier": "TEST-8",
+      "title": "Search",
+      "url": "https://linear.app/t/issue/TEST-8",
+      "state_name": "Todo",
+      "state_type": "unstarted",
+      "priority_label": "Medium",
+      "assignee": "me",
+      "age_days": 50,
+      "age_bucket": 30,
+      "inactive_days": 50,
+      "in_progress_days": null,
+      "in_cycle": false
+    },
+    {
+      "identifier": "TEST-6",
+      "title": "Dark mode",
+      "url": "https://linear.app/t/issue/TEST-6",
+      "state_name": "Backlog",
+      "state_type": "backlog",
+      "priority_label": "Medium",
+      "assignee": "me",
+      "age_days": 60,
+      "age_bucket": 30,
+      "inactive_days": 60,
+      "in_progress_days": null,
+      "in_cycle": false
+    }
+  ],
+  "epics": [
+    {
+      "kind": "project",
+      "subject": "Epic p1",
+      "title": "Epic p1",
+      "url": "https://linear.app/t/project/p1",
+      "status": "Started",
+      "owner": "me",
+      "complete_data": true,
+      "children": 2,
+      "done": 1,
+      "open": 1,
+      "unassigned": [],
+      "blocked": [
+        "TEST-3"
+      ],
+      "aged": [],
+      "outside_cycle": [],
+      "in_progress": 1
+    },
+    {
+      "kind": "project",
+      "subject": "Epic p2",
+      "title": "Epic p2",
+      "url": "https://linear.app/t/project/p2",
+      "status": "Planned",
+      "owner": "me",
+      "complete_data": true,
+      "children": 3,
+      "done": 1,
+      "open": 2,
+      "unassigned": [],
+      "blocked": [],
+      "aged": [
+        "TEST-6",
+        "TEST-8"
+      ],
+      "outside_cycle": [
+        "TEST-6",
+        "TEST-8"
+      ],
+      "in_progress": 0
+    },
+    {
+      "kind": "parent",
+      "subject": "TEST-8",
+      "title": "Search",
+      "url": "https://linear.app/t/issue/TEST-8",
+      "status": "Todo",
+      "owner": "me",
+      "complete_data": true,
+      "children": 1,
+      "done": 1,
+      "open": 0,
+      "unassigned": [],
+      "blocked": [],
+      "aged": [],
+      "outside_cycle": [],
+      "in_progress": 0
+    }
+  ],
+  "pull_requests": [
+    {
+      "subject": "acme/app#11",
+      "title": "Payments client",
+      "url": "https://github.com/acme/app/pull/11",
+      "author": "me",
+      "age_days": 16,
+      "inactive_days": 1,
+      "is_draft": false,
+      "review": "none",
+      "checks": "success",
+      "mergeable": "unknown",
+      "behind_by": null,
+      "linear_ids": [
+        "TEST-3"
+      ]
+    },
+    {
+      "subject": "acme/app#12",
+      "title": "Flaky test fix",
+      "url": "https://github.com/acme/app/pull/12",
+      "author": "me",
+      "age_days": 3,
+      "inactive_days": 2,
+      "is_draft": false,
+      "review": "none",
+      "checks": "failure",
+      "mergeable": "unknown",
+      "behind_by": null,
+      "linear_ids": [
+        "TEST-2"
+      ]
+    },
+    {
+      "subject": "acme/app#13",
+      "title": "Spike: GraphQL",
+      "url": "https://github.com/acme/app/pull/13",
+      "author": "me",
+      "age_days": 30,
+      "inactive_days": 20,
+      "is_draft": true,
+      "review": "none",
+      "checks": "none",
+      "mergeable": "unknown",
+      "behind_by": null,
+      "linear_ids": []
+    }
+  ],
+  "warnings": [
+    "linear: only 4 of 5 cycle issues have estimates; points are not reported"
+  ]
+}

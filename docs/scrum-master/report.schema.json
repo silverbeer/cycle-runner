@@ -1,0 +1,766 @@
+{
+  "$defs": {
+    "AgingRow": {
+      "additionalProperties": false,
+      "properties": {
+        "identifier": {
+          "title": "Identifier",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "state_name": {
+          "title": "State Name",
+          "type": "string"
+        },
+        "state_type": {
+          "title": "State Type",
+          "type": "string"
+        },
+        "priority_label": {
+          "title": "Priority Label",
+          "type": "string"
+        },
+        "assignee": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Assignee"
+        },
+        "age_days": {
+          "title": "Age Days",
+          "type": "integer"
+        },
+        "age_bucket": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Age Bucket"
+        },
+        "inactive_days": {
+          "title": "Inactive Days",
+          "type": "integer"
+        },
+        "in_progress_days": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "In Progress Days"
+        },
+        "in_cycle": {
+          "title": "In Cycle",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "identifier",
+        "title",
+        "url",
+        "state_name",
+        "state_type",
+        "priority_label",
+        "assignee",
+        "age_days",
+        "age_bucket",
+        "inactive_days",
+        "in_progress_days",
+        "in_cycle"
+      ],
+      "title": "AgingRow",
+      "type": "object"
+    },
+    "CycleHealth": {
+      "additionalProperties": false,
+      "properties": {
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "starts_on": {
+          "format": "date",
+          "title": "Starts On",
+          "type": "string"
+        },
+        "ends_on": {
+          "format": "date",
+          "title": "Ends On",
+          "type": "string"
+        },
+        "days_elapsed": {
+          "title": "Days Elapsed",
+          "type": "integer"
+        },
+        "days_remaining": {
+          "title": "Days Remaining",
+          "type": "integer"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        },
+        "excluded": {
+          "title": "Excluded",
+          "type": "integer"
+        },
+        "completed": {
+          "title": "Completed",
+          "type": "integer"
+        },
+        "completion_by_count": {
+          "title": "Completion By Count",
+          "type": "integer"
+        },
+        "in_progress": {
+          "title": "In Progress",
+          "type": "integer"
+        },
+        "unstarted": {
+          "title": "Unstarted",
+          "type": "integer"
+        },
+        "blocked": {
+          "title": "Blocked",
+          "type": "integer"
+        },
+        "aging_or_inactive": {
+          "title": "Aging Or Inactive",
+          "type": "integer"
+        },
+        "estimates_present": {
+          "title": "Estimates Present",
+          "type": "integer"
+        },
+        "points_total": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Points Total"
+        },
+        "points_completed": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Points Completed"
+        },
+        "added_after_start": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Added After Start",
+          "type": "array"
+        },
+        "carried_in": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Carried In"
+        },
+        "carryover_risk": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Carryover Risk",
+          "type": "array"
+        }
+      },
+      "required": [
+        "number",
+        "name",
+        "starts_on",
+        "ends_on",
+        "days_elapsed",
+        "days_remaining",
+        "total",
+        "excluded",
+        "completed",
+        "completion_by_count",
+        "in_progress",
+        "unstarted",
+        "blocked",
+        "aging_or_inactive",
+        "estimates_present",
+        "points_total",
+        "points_completed",
+        "added_after_start",
+        "carried_in",
+        "carryover_risk"
+      ],
+      "title": "CycleHealth",
+      "type": "object"
+    },
+    "EpicRow": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "project",
+            "parent"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Owner"
+        },
+        "complete_data": {
+          "title": "Complete Data",
+          "type": "boolean"
+        },
+        "children": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Children"
+        },
+        "done": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Done"
+        },
+        "open": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Open"
+        },
+        "unassigned": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unassigned",
+          "type": "array"
+        },
+        "blocked": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blocked",
+          "type": "array"
+        },
+        "aged": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Aged",
+          "type": "array"
+        },
+        "outside_cycle": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Outside Cycle",
+          "type": "array"
+        },
+        "in_progress": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "In Progress"
+        }
+      },
+      "required": [
+        "kind",
+        "subject",
+        "title",
+        "url",
+        "status",
+        "owner",
+        "complete_data",
+        "children",
+        "done",
+        "open",
+        "unassigned",
+        "blocked",
+        "aged",
+        "outside_cycle",
+        "in_progress"
+      ],
+      "title": "EpicRow",
+      "type": "object"
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "properties": {
+        "rule": {
+          "title": "Rule",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "severity_reason": {
+          "title": "Severity Reason",
+          "type": "string"
+        },
+        "section": {
+          "enum": [
+            "cycle",
+            "aging",
+            "blockers",
+            "epics",
+            "prs",
+            "branches"
+          ],
+          "title": "Section",
+          "type": "string"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "source_priority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Priority"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "action": {
+          "title": "Action",
+          "type": "string"
+        },
+        "group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group"
+        },
+        "rank_priority": {
+          "default": 5,
+          "title": "Rank Priority",
+          "type": "integer"
+        },
+        "rank_age": {
+          "default": 0,
+          "title": "Rank Age",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rule",
+        "severity",
+        "severity_reason",
+        "section",
+        "subject",
+        "title",
+        "evidence",
+        "action"
+      ],
+      "title": "Finding",
+      "type": "object"
+    },
+    "PRRow": {
+      "additionalProperties": false,
+      "properties": {
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Author"
+        },
+        "age_days": {
+          "title": "Age Days",
+          "type": "integer"
+        },
+        "inactive_days": {
+          "title": "Inactive Days",
+          "type": "integer"
+        },
+        "is_draft": {
+          "title": "Is Draft",
+          "type": "boolean"
+        },
+        "review": {
+          "title": "Review",
+          "type": "string"
+        },
+        "checks": {
+          "title": "Checks",
+          "type": "string"
+        },
+        "mergeable": {
+          "title": "Mergeable",
+          "type": "string"
+        },
+        "behind_by": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Behind By"
+        },
+        "linear_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linear Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "subject",
+        "title",
+        "url",
+        "author",
+        "age_days",
+        "inactive_days",
+        "is_draft",
+        "review",
+        "checks",
+        "mergeable",
+        "behind_by",
+        "linear_ids"
+      ],
+      "title": "PRRow",
+      "type": "object"
+    },
+    "Scope": {
+      "additionalProperties": false,
+      "properties": {
+        "team": {
+          "title": "Team",
+          "type": "string"
+        },
+        "repos": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Repos",
+          "type": "array"
+        },
+        "cycle": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cycle"
+        }
+      },
+      "required": [
+        "team",
+        "repos"
+      ],
+      "title": "Scope",
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ],
+      "title": "Severity",
+      "type": "string"
+    },
+    "SourceStatus": {
+      "additionalProperties": false,
+      "description": "How one source's collection went. complete=False means some of its data is missing.",
+      "properties": {
+        "name": {
+          "enum": [
+            "linear",
+            "github",
+            "git"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "ok",
+        "complete"
+      ],
+      "title": "SourceStatus",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    },
+    "collected_at": {
+      "format": "date-time",
+      "title": "Collected At",
+      "type": "string"
+    },
+    "timezone": {
+      "title": "Timezone",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/Scope"
+    },
+    "complete": {
+      "title": "Complete",
+      "type": "boolean"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/SourceStatus"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "cycle": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CycleHealth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "top_actions": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "title": "Top Actions",
+      "type": "array"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "aging": {
+      "items": {
+        "$ref": "#/$defs/AgingRow"
+      },
+      "title": "Aging",
+      "type": "array"
+    },
+    "epics": {
+      "items": {
+        "$ref": "#/$defs/EpicRow"
+      },
+      "title": "Epics",
+      "type": "array"
+    },
+    "pull_requests": {
+      "items": {
+        "$ref": "#/$defs/PRRow"
+      },
+      "title": "Pull Requests",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "generated_at",
+    "collected_at",
+    "timezone",
+    "scope",
+    "complete",
+    "sources",
+    "cycle",
+    "top_actions",
+    "findings",
+    "aging",
+    "epics",
+    "pull_requests",
+    "warnings"
+  ],
+  "title": "Report",
+  "type": "object"
+}

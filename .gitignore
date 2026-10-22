@@ -16,6 +16,10 @@ wheels/
 .env
 .env.*
 !.env.github.example
+!.env.scrum.example
+
+# Scrum Master: private additions to scrum.toml
+scrum.local.toml
 
 # Cycle Runner application state (local SQLite)
 data/
