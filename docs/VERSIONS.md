@@ -24,6 +24,7 @@ it does, how it was verified, and what it deliberately left out.
 | [V1.5a](#v15a) | Real MissingTable delivery: MT configured for GitHub, a `request` CLI for one named issue; live run delivered SB-866 as MT draft PR #658 | [SB-1186](https://linear.app/silverbeer/issue/SB-1186) | [#14](https://github.com/silverbeer/cycle-runner/pull/14) | — |
 | [V1.5b](#v15b) | In progress. A delivering project's clone starts from GitHub's latest base, not the local checkout's | [SB-1208](https://linear.app/silverbeer/issue/SB-1208) | — | — |
 | [V1.6](#v16) | Daily standup to Telegram, weekdays 08:00 ET from k3s. Plain code, no model | [SB-1211](https://linear.app/silverbeer/issue/SB-1211) | — | — |
+| [V1.6b](#v16b) | Scrum Master: a manual, read-only health report from Linear, GitHub and git (`scrum-master`). Plain code, no model | [SB-1385](https://linear.app/silverbeer/issue/SB-1385) | — | — |
 
 ## Roadmap: replacing the k3s agents
 
@@ -1913,3 +1914,32 @@ and the standup imports only `httpx`, `pydantic` and `telegram`.
 
 Checked in k3s with the real Secret, as non-root on a read-only root
 filesystem: the standup rendered from live Linear data.
+
+## V1.6b
+
+The Scrum Master report (SB-1385): run by hand, read-only, no model. Full
+notes in [scrum-master.md](scrum-master.md).
+
+- **Three stages, each runnable alone:** `collect` (Linear, GitHub, local
+  git → a versioned snapshot), `analyze` (pure rules → a report with rule ids,
+  evidence and severity reasons), `render` (terminal, Markdown, JSON). The
+  boundaries are where Swamp behaviors (SB-1386), a schedule or Telegram can
+  attach later.
+- **Honest about gaps:** each source records whether it was complete. A
+  GitHub or git failure gives a report marked PARTIAL (`--strict` exits 2);
+  a Linear failure gives no report.
+- **Read-only by construction:** the Linear app's `read` scope, a GitHub
+  client with only GET and GraphQL queries, and an allowlist of read-only
+  git commands. A separate read-only GitHub token, never the delivery token.
+- **Shared fix:** `linear_client` now retries transient failures (connection
+  errors, 429, 5xx, `RATELIMITED`) twice with backoff, so the standup gets
+  it too.
+- **First live run (2026-10-22):** 924 issues and 33 projects in 58 Linear
+  queries, 15 repositories, ~45 s. Tuned on that data: waiting on unstarted
+  cycle work is sequencing, not a crisis (the root of the chain is named);
+  backlog waiting on backlog isn't reported; local branch cleanups are
+  grouped per checkout with one command.
+
+**Not in V1.6b:** container, schedule, Telegram, notification history,
+Swamp, LLM summaries, throughput forecasting.
+

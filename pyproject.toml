@@ -16,6 +16,10 @@ dependencies = [
     "python-telegram-bot>=22.8",
 ]
 
+[project.scripts]
+# Needs the `scrum` dependency group (installed by default by `uv sync`).
+scrum-master = "cycle_runner.scrum.cli:main"
+
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]
 build-backend = "uv_build"
@@ -33,11 +37,16 @@ agent = [
 executor = [
     "claude-agent-sdk>=0.2.160",
 ]
+# The Scrum Master report CLI (SB-1385): Typer and Rich, kept out of the k3s image.
+scrum = [
+    "rich>=15.0.0",
+    "typer>=0.27.3",
+]
 
 [tool.uv]
 # `uv run` and `uv sync` keep installing everything locally and in CI; the
 # Dockerfile opts out with --no-default-groups.
-default-groups = ["dev", "agent", "executor"]
+default-groups = ["dev", "agent", "executor", "scrum"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -47,4 +56,5 @@ markers = [
     "linear: talks to the real Linear API (skipped unless run under `op run` with Linear credentials)",
     "claude: runs a real Claude coding agent (skipped unless CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set)",
     "github: pushes to and opens draft PRs on the disposable sandbox repo (skipped unless CYCLE_RUNNER_GITHUB_TOKEN is set)",
+    "github_read: reads the real GitHub API with the Scrum Master's read-only token (skipped unless SCRUM_GITHUB_TOKEN is set)",
 ]

@@ -12,12 +12,17 @@ Read-only in three layers:
 
 Credentials come from LINEAR_CLIENT_ID and LINEAR_CLIENT_SECRET. They are never
 logged, never included in exception messages, and hidden from repr().
+
+Transient failures (connection errors, HTTP 429 and 5xx, Linear's RATELIMITED
+error) are retried a bounded number of times with backoff; anything else fails
+at once.
 """
 
+import asyncio
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
 import httpx
@@ -25,6 +30,9 @@ import httpx
 API_URL = "https://api.linear.app/graphql"
 TOKEN_URL = "https://api.linear.app/oauth/token"
 SCOPE = "read"
+ATTEMPTS = 3  # one try plus two retries, for transient failures only
+BACKOFF_SECONDS = 2.0  # doubled each retry; a Retry-After header wins when present
+MAX_WAIT_SECONDS = 60.0
 
 
 class LinearError(Exception):
@@ -37,6 +45,8 @@ class LinearClient:
     client_secret: str = field(repr=False)
     # Tests pass an httpx.MockTransport; in real use httpx picks its default.
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+    # Tests pass a fake sleep so retries don't wait.
+    sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
     _token: str | None = field(default=None, init=False, repr=False)
     _token_expires_at: float = field(default=0.0, init=False, repr=False)
 
@@ -86,16 +96,25 @@ class LinearClient:
         return self._token
 
     async def _post(self, url: str, **kwargs) -> httpx.Response:
-        try:
-            async with httpx.AsyncClient(transport=self.transport, timeout=15) as http:
-                response = await http.post(url, **kwargs)
-        except httpx.HTTPError as exc:
-            raise LinearError(f"could not reach Linear ({type(exc).__name__})") from None
-        # Linear reports GraphQL errors with a 200 or a 400 and a JSON body; anything
-        # else (401, 5xx, HTML) is an HTTP-level failure. Only the status is reported.
-        if response.status_code >= 400 and not _is_json(response):
-            raise LinearError(f"Linear returned HTTP {response.status_code}")
-        return response
+        for attempt in range(1, ATTEMPTS + 1):
+            last = attempt == ATTEMPTS
+            try:
+                async with httpx.AsyncClient(transport=self.transport, timeout=15) as http:
+                    response = await http.post(url, **kwargs)
+            except httpx.HTTPError as exc:
+                if last:
+                    raise LinearError(f"could not reach Linear ({type(exc).__name__})") from None
+                await self.sleep(_backoff(attempt, None))
+                continue
+            if _is_transient(response) and not last:
+                await self.sleep(_backoff(attempt, response))
+                continue
+            # Linear reports GraphQL errors with a 200 or a 400 and a JSON body; anything
+            # else (401, 5xx, HTML) is an HTTP-level failure. Only the status is reported.
+            if response.status_code >= 400 and not _is_json(response):
+                raise LinearError(f"Linear returned HTTP {response.status_code}")
+            return response
+        raise AssertionError("unreachable")
 
 
 _OPERATION = re.compile(r"\b(mutation|subscription)\b")
@@ -113,6 +132,25 @@ def _first_error_message(errors: list[dict]) -> str:
     first = errors[0]
     extensions = first.get("extensions") or {}
     return extensions.get("userPresentableMessage") or first.get("message") or "Linear error"
+
+
+def _is_transient(response: httpx.Response) -> bool:
+    if response.status_code == 429 or response.status_code >= 500:
+        return True
+    if _is_json(response):
+        try:
+            errors = response.json().get("errors") or []
+        except ValueError:
+            return False
+        return any((error.get("extensions") or {}).get("code") == "RATELIMITED" for error in errors)
+    return False
+
+
+def _backoff(attempt: int, response: httpx.Response | None) -> float:
+    retry_after = response.headers.get("retry-after") if response is not None else None
+    if retry_after and retry_after.isdigit():
+        return min(float(retry_after), MAX_WAIT_SECONDS)
+    return min(BACKOFF_SECONDS * 2 ** (attempt - 1), MAX_WAIT_SECONDS)
 
 
 def _is_json(response: httpx.Response) -> bool:

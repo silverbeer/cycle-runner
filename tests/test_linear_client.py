@@ -35,7 +35,14 @@ class FakeLinearServer:
         return httpx.Response(self.graphql_status, json=self.graphql)
 
     def client(self) -> LinearClient:
-        return LinearClient("client-id", SECRET, transport=httpx.MockTransport(self.handler))
+        return LinearClient("client-id", SECRET, transport=httpx.MockTransport(self.handler), sleep=no_sleep)
+
+
+async def no_sleep(seconds: float) -> None:
+    SLEEPS.append(seconds)
+
+
+SLEEPS: list[float] = []
 
 
 # --- configuration -----------------------------------------------------------
@@ -152,7 +159,7 @@ def test_http_failures_report_only_the_status():
             return httpx.Response(200, json={"access_token": TOKEN, "expires_in": 100, "scope": "read"})
         return httpx.Response(502, text=f"<html>bad gateway {TOKEN}</html>")
 
-    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler))
+    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler), sleep=no_sleep)
     with pytest.raises(LinearError) as info:
         asyncio.run(client.query("{ viewer { name } }"))
     assert str(info.value) == "Linear returned HTTP 502"
@@ -162,9 +169,53 @@ def test_network_failures_become_linear_errors():
     def handler(request):
         raise httpx.ConnectError("boom")
 
-    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler))
+    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler), sleep=no_sleep)
     with pytest.raises(LinearError, match="could not reach Linear"):
         asyncio.run(client.query("{ viewer { name } }"))
+
+
+def _flaky(responses):
+    """A handler whose GraphQL endpoint answers with each response in turn."""
+    calls = []
+
+    def handler(request):
+        if str(request.url) == TOKEN_URL:
+            return httpx.Response(200, json={"access_token": TOKEN, "expires_in": 100, "scope": "read"})
+        calls.append(request)
+        return responses[min(len(calls), len(responses)) - 1]
+
+    return handler, calls
+
+
+@pytest.mark.parametrize("transient", [
+    httpx.Response(503, text="unavailable"),
+    httpx.Response(429, headers={"retry-after": "7"}, text="slow down"),
+    httpx.Response(400, json={"errors": [{"message": "rate", "extensions": {"code": "RATELIMITED"}}]}),
+])
+def test_transient_failures_are_retried(transient):
+    SLEEPS.clear()
+    handler, calls = _flaky([transient, httpx.Response(200, json={"data": {"viewer": {"name": "ok"}}})])
+    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler), sleep=no_sleep)
+    assert asyncio.run(client.query("{ viewer { name } }")) == {"viewer": {"name": "ok"}}
+    assert len(calls) == 2
+    assert SLEEPS == ([7.0] if transient.status_code == 429 else [2.0])
+
+
+def test_retries_are_bounded():
+    SLEEPS.clear()
+    handler, calls = _flaky([httpx.Response(503, text="unavailable")])
+    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler), sleep=no_sleep)
+    with pytest.raises(LinearError, match="HTTP 503"):
+        asyncio.run(client.query("{ viewer { name } }"))
+    assert len(calls) == 3 and SLEEPS == [2.0, 4.0]
+
+
+def test_ordinary_errors_are_not_retried():
+    handler, calls = _flaky([httpx.Response(400, json={"errors": [{"message": "bad field"}]})])
+    client = LinearClient("id", SECRET, transport=httpx.MockTransport(handler), sleep=no_sleep)
+    with pytest.raises(LinearError, match="bad field"):
+        asyncio.run(client.query("{ viewer { name } }"))
+    assert len(calls) == 1
 
 
 def test_nothing_secret_is_logged(caplog):

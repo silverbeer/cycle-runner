@@ -34,6 +34,8 @@ def no_real_linear(request, monkeypatch):
     if request.node.get_closest_marker("linear") is None:
         for name in ("LINEAR_CLIENT_ID", "LINEAR_CLIENT_SECRET"):
             monkeypatch.delenv(name, raising=False)
+    if request.node.get_closest_marker("github_read") is None:
+        monkeypatch.delenv("SCRUM_GITHUB_TOKEN", raising=False)  # the Scrum Master's read-only token
     yield
     real_client.cache_clear()
 

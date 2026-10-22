@@ -1,0 +1,87 @@
+# Scrum Master configuration (SB-1385). No secrets here: credentials come from
+# the environment (.env for Linear, .env.scrum for GitHub), under `op run`.
+# `scrum-master config` shows the effective values; every key is optional.
+
+team = "SB"                       # the one Linear team in scope
+timezone = "America/New_York"     # days are counted between local calendar dates
+
+[thresholds]
+age_buckets = [3, 7, 14, 30]      # issue age, days
+inactive_days = 7                 # in progress with no update this long = inactive
+in_progress_days = 14             # in progress this long, even if active
+backlog_inactive_days = 30
+pr_old_days = [7, 14]
+pr_inactive_days = 7
+draft_inactive_days = 14
+branch_inactive_days = 14         # cleanup candidates must be at least this idle
+ci_persistent_hours = 24
+cycle_risk_days = 2
+estimate_coverage = 0.9           # sum points only if this share of cycle issues is estimated
+added_after_start_grace_hours = 1
+
+[severity]
+# Override a rule's severity; the report says it was overridden. Rule ids are in docs/scrum-master.md.
+# "PR-UNLINKED" = "medium"
+
+[github]
+token_env = "SCRUM_GITHUB_TOKEN"  # a read-only fine-grained PAT; never the delivery token
+
+# Private repositories go in scrum.local.toml (same format, gitignored); its
+# [[repos]] are added to these.
+#
+# The allowlist: only these repositories are read. `local` adds branch and
+# worktree checks on that checkout (read-only git; nothing is fetched).
+[[repos]]
+github = "silverbeer/missing-table"
+local = "~/gitrepos/missing-table"
+
+[[repos]]
+github = "silverbeer/missing-table-android"
+local = "~/gitrepos/missing-table-android"
+
+[[repos]]
+github = "silverbeer/mt-ios"
+local = "~/gitrepos/mt-ios"
+
+[[repos]]
+github = "silverbeer/missingtable-platform-bootstrap"
+local = "~/gitrepos/missingtable-platform-bootstrap"
+
+[[repos]]
+github = "silverbeer/match-scraper"
+local = "~/gitrepos/match-scraper"
+
+[[repos]]
+github = "silverbeer/match-scraper-agent"
+local = "~/gitrepos/match-scraper-agent"
+
+[[repos]]
+github = "silverbeer/trd"
+local = "~/gitrepos/trd"
+
+[[repos]]
+github = "silverbeer/janitor"
+local = "~/gitrepos/janitor"
+
+[[repos]]
+github = "silverbeer/dotfiles"
+local = "~/gitrepos/dotfiles"
+
+[[repos]]
+github = "silverbeer/cycle-runner"
+local = "~/gitrepos/cycle-runner"
+
+[[repos]]
+github = "silverbeer/bet"
+
+[[repos]]
+github = "silverbeer/myrunstreak.run"
+local = "~/gitrepos/myrunstreak.run"
+
+[[repos]]
+github = "silverbeer/qualityplaybook.dev"
+local = "~/gitrepos/qualityplaybook.dev"
+
+[[repos]]
+github = "silverbeer/todo"
+local = "~/gitrepos/todo"
