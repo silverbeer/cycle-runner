@@ -3,6 +3,8 @@
 Read-only in three layers:
 1. The token is meant to be a fine-grained PAT with read permissions only
    (`scrum-master doctor` warns about a classic token with write scopes).
+   Without one, the token `gh` is logged in with is used, which usually can
+   write; layers 2 and 3 are then the guarantee.
 2. The only methods are get() (HTTP GET) and query() (GraphQL), and query()
    rejects any document that isn't a query.
 3. Nothing above this module is given a way to send anything else.
@@ -16,6 +18,8 @@ limits) are retried a bounded number of times.
 import asyncio
 import os
 import re
+import shutil
+import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
@@ -36,18 +40,23 @@ class GitHubError(Exception):
 @dataclass
 class GitHubClient:
     token: str = field(repr=False)
+    source: str = "token"  # where the token came from, for messages; never the token itself
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
     requests_made: int = field(default=0, init=False)
 
     @classmethod
     def from_env(cls, name: str, environ: Mapping[str, str] = os.environ) -> "GitHubClient":
+        """The token in `name`, or else the one `gh` is logged in with."""
         token = environ.get(name, "").strip()
-        if not token:
-            raise GitHubError(f"{name} is not set")
         if token.startswith("op://"):
             raise GitHubError(f"{name} is an unresolved 1Password reference; run under `op run --env-file .env.scrum`")
-        return cls(token=token)
+        if token:
+            return cls(token=token, source=name)
+        token = gh_cli_token()
+        if not token:
+            raise GitHubError(f"{name} is not set and `gh auth token` gave none")
+        return cls(token=token, source="`gh auth token`")
 
     async def get(self, path: str, params: dict | None = None) -> httpx.Response:
         """GET a REST path such as /repos/o/r. Returns the response; 404 is the caller's to interpret."""
@@ -125,6 +134,18 @@ def _backoff(attempt: int, response: httpx.Response | None) -> float:
 
 def _safe_path(path: str) -> str:
     return path.split("?", 1)[0]
+
+
+def gh_cli_token() -> str | None:
+    """The token the GitHub CLI is logged in with, or None. Read-only: `gh auth token` only prints it."""
+    if shutil.which("gh") is None:
+        return None
+    try:
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    token = result.stdout.strip()
+    return token if result.returncode == 0 and token else None
 
 
 def write_scopes(response: httpx.Response) -> set[str]:

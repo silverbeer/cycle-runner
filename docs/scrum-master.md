@@ -21,7 +21,7 @@ changing them. None of that is in this version.
 
 ```bash
 uv sync                     # installs the `scrum` group (Typer, Rich) with the rest
-cp .env.scrum.example .env.scrum
+gh auth status              # GitHub: the gh CLI's login is used unless SCRUM_GITHUB_TOKEN is set
 ```
 
 **Linear** uses the existing read-only Cycle Runner app (`LINEAR_CLIENT_ID`,
@@ -29,23 +29,26 @@ cp .env.scrum.example .env.scrum
 so Linear refuses writes, and the client also rejects any GraphQL document
 that isn't a query.
 
-**GitHub** needs its own token, `SCRUM_GITHUB_TOKEN`, from `.env.scrum`. Make
-a fine-grained personal access token limited to the repositories in
-`scrum.toml`, with **read-only** permissions: Contents, Pull requests and
-Commit statuses (Metadata is implied). Store it as
-`op://agents/cycle-runner-github-read/credential`. Don't reuse
-`CYCLE_RUNNER_GITHUB_TOKEN`: that one can push. `doctor` warns if the token
-is a classic token with write scopes.
+**GitHub** reads `SCRUM_GITHUB_TOKEN` if it is set, and otherwise the token
+the GitHub CLI is logged in with (`gh auth token`). That token can usually
+write, so `doctor` warns about it; the client still only reads (see
+*Read-only guarantees*). For a token that can't write, which anything running
+unattended should use, make a fine-grained personal access token limited to
+the repositories in `scrum.toml`, with **read-only** permissions: Contents,
+Pull requests and Commit statuses (Metadata is implied). Store it as
+`op://agents/cycle-runner-github-read/credential`,
+`cp .env.scrum.example .env.scrum`, and add `--env-file .env.scrum` to the
+commands below. Don't reuse `CYCLE_RUNNER_GITHUB_TOKEN`: that one can push.
 
 **Local git** needs nothing. Checkouts listed under `local` in `scrum.toml`
 are inspected with read-only commands only (see *Read-only guarantees*).
 
 ## Run it
 
-Every live command runs under `op run` with both env files:
+Every live command runs under `op run`, for the Linear credentials:
 
 ```bash
-alias sm='op run --env-file .env --env-file .env.scrum -- uv run scrum-master'
+alias sm='op run --env-file .env -- uv run scrum-master'
 
 sm doctor                         # config, credentials, access; prints no secrets
 sm report                         # the whole report in the terminal
@@ -219,6 +222,8 @@ Transient failures (connection errors, HTTP 429 and 5xx, Linear's
   subscriptions; tests assert every document sent is a query.
 - **GitHub**: the client has only `get()` (HTTP GET) and `query()` (GraphQL,
   mutations rejected); tests assert every request is a GET or a GraphQL query.
+  This holds even with the `gh` CLI's token, which can write; `gh` itself is
+  only ever run as `gh auth token`.
 - **git**: an allowlist (`for-each-ref`, `branch --merged`,
   `worktree list --porcelain`, `status --porcelain`, `symbolic-ref`,
   `rev-parse --git-common-dir`); delete, move and force flags are refused;
@@ -245,7 +250,7 @@ for ordering.
 ```bash
 uv run pytest tests/test_scrum_*.py          # offline: mocked APIs, temp git repos
 op run --env-file .env -- uv run pytest -m linear tests/test_scrum_live.py
-op run --env-file .env --env-file .env.scrum -- uv run pytest -m "linear and github_read" tests/test_scrum_live.py
+op run --env-file .env -- uv run pytest -m "linear and github_read" tests/test_scrum_live.py
 ```
 
 The live tests are read-only and assert shape, not workspace contents. CI
