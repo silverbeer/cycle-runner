@@ -70,11 +70,12 @@ async def _linear(config: Config, environ, client: LinearClient | None) -> list[
 async def _github(config: Config, environ, client: GitHubClient | None) -> list[Check]:
     if not config.repos:
         return [Check("github", "warn", "no repositories configured in scrum.toml")]
-    name = config.github.token_env
-    problem = _presence(environ, name)
-    if problem and client is None:
-        return [Check("github token", "fail", f"{problem}; PR and branch sections will be missing")]
-    client = client or GitHubClient(token=environ[name].strip())
+    if client is None:
+        try:
+            client = GitHubClient.from_env(config.github.token_env, environ)
+        except GitHubError as exc:
+            return [Check("github token", "fail", f"{exc}; PR and branch sections will be missing")]
+    name = client.source
     try:
         user = await client.get("/user")
     except GitHubError as exc:

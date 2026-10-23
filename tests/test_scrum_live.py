@@ -1,7 +1,7 @@
 """Scrum Master against the real Linear and GitHub APIs, read-only. Opt-in:
 
     op run --env-file .env -- uv run pytest -m linear tests/test_scrum_live.py
-    op run --env-file .env --env-file .env.scrum -- uv run pytest -m "linear and github_read" tests/test_scrum_live.py
+    op run --env-file .env -- uv run pytest -m "linear and github_read" tests/test_scrum_live.py   # gh CLI's token
 
 Nothing here writes: the same read-only clients as the CLI, and assertions on
 the shape of what comes back, not on workspace contents.
@@ -18,6 +18,7 @@ from cycle_runner.scrum import collect_linear
 from cycle_runner.scrum.analyze import analyze
 from cycle_runner.scrum.collect import collect, github_client
 from cycle_runner.scrum.config import load
+from cycle_runner.scrum.github_client import gh_cli_token
 
 
 def _resolved(name: str) -> bool:
@@ -26,7 +27,8 @@ def _resolved(name: str) -> bool:
 
 
 needs_linear = pytest.mark.skipif(not _resolved("LINEAR_CLIENT_ID"), reason="needs `op run --env-file .env`")
-needs_github = pytest.mark.skipif(not _resolved("SCRUM_GITHUB_TOKEN"), reason="needs `op run --env-file .env.scrum`")
+needs_github = pytest.mark.skipif(not (_resolved("SCRUM_GITHUB_TOKEN") or gh_cli_token()),
+                                  reason="needs `gh auth login` or `op run --env-file .env.scrum`")
 
 
 @pytest.mark.linear

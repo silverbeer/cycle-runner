@@ -32,7 +32,7 @@ from scrum_factory import (
 from typer.testing import CliRunner
 
 from cycle_runner.linear_client import LinearClient
-from cycle_runner.scrum import doctor, render
+from cycle_runner.scrum import doctor, github_client, render
 from cycle_runner.scrum.analyze import analyze
 from cycle_runner.scrum.cli import app
 from cycle_runner.scrum.config import Config, RepoConfig
@@ -286,6 +286,15 @@ def test_doctor_reports_missing_and_unresolved_credentials():
     by_name = {r.name: r for r in results}
     assert by_name["linear credentials"].status == "fail" and "op run" in by_name["linear credentials"].detail
     assert by_name["github token"].status == "fail" and "is not set" in by_name["github token"].detail
+
+
+def test_doctor_names_the_gh_cli_fallback_without_showing_it(monkeypatch):
+    monkeypatch.setattr(github_client, "gh_cli_token", lambda: GH_TOKEN)
+    monkeypatch.setattr(GitHubClient, "get", _fake_github(scopes="repo, workflow").get)
+    results = _doctor({"LINEAR_CLIENT_ID": "id", "LINEAR_CLIENT_SECRET": SECRET}, linear=_fake_linear())
+    token = next(r for r in results if r.name == "github token")
+    assert token.status == "warn" and token.detail.startswith("`gh auth token` is a classic token")
+    assert GH_TOKEN not in " ".join(r.detail for r in results)
 
 
 def test_doctor_reports_linear_failure():

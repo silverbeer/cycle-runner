@@ -1930,7 +1930,9 @@ notes in [scrum-master.md](scrum-master.md).
   a Linear failure gives no report.
 - **Read-only by construction:** the Linear app's `read` scope, a GitHub
   client with only GET and GraphQL queries, and an allowlist of read-only
-  git commands. A separate read-only GitHub token, never the delivery token.
+  git commands. Never the delivery token: a read-only GitHub token if one is
+  set, otherwise the `gh` CLI's login (SB-1391), which `doctor` flags when it
+  can write.
 - **Shared fix:** `linear_client` now retries transient failures (connection
   errors, 429, 5xx, `RATELIMITED`) twice with backoff, so the standup gets
   it too.

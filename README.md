@@ -58,8 +58,8 @@ cycle health, top three actions, aging and blocked work, epics, open PRs and
 branch cleanup candidates. Plain code, no model, writes nothing.
 
 ```bash
-op run --env-file .env --env-file .env.scrum -- uv run scrum-master doctor
-op run --env-file .env --env-file .env.scrum -- uv run scrum-master report
+op run --env-file .env -- uv run scrum-master doctor   # GitHub via `gh auth token`
+op run --env-file .env -- uv run scrum-master report
 ```
 
 Setup, commands, rules and limitations: [docs/scrum-master.md](docs/scrum-master.md).
@@ -72,7 +72,7 @@ uv run pytest -m "not ollama and not telegram and not linear"   # offline only
 uv run pytest -m ollama                # live round-trips through the local model
 op run --env-file .env -- uv run pytest -m telegram   # real Telegram API
 op run --env-file .env -- uv run pytest -m linear     # real Linear API, read-only
-op run --env-file .env --env-file .env.scrum -- uv run pytest -m github_read   # Scrum Master, real GitHub, read-only
+op run --env-file .env -- uv run pytest -m github_read   # Scrum Master, real GitHub, read-only
 CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) uv run pytest -m claude   # real coding agent
 CLAUDE_CODE_OAUTH_TOKEN=$(op read op://agents/cycle-runner-claude/token) \
     op run --env-file .env -- uv run pytest tests/test_mt_live.py -s   # agent on a MissingTable clone (V1.2)

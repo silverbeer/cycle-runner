@@ -12,7 +12,9 @@ from scrum_factory import NOW
 from cycle_runner.scrum import collect_git, collect_github, collect_linear
 from cycle_runner.scrum.collect import collect
 from cycle_runner.scrum.config import Config, RepoConfig
+from cycle_runner.scrum import github_client
 from cycle_runner.scrum.github_client import GRAPHQL_URL, GitHubClient, GitHubError
+from cycle_runner.scrum.github_client import gh_cli_token as real_gh_cli_token  # conftest stubs the module's
 
 TOKEN = "ghp_" + "z" * 36
 
@@ -288,6 +290,40 @@ def test_github_rejected_token_is_not_retried():
 def test_github_token_must_be_present_and_resolved(value, message):
     with pytest.raises(GitHubError, match=message):
         GitHubClient.from_env("SCRUM_GITHUB_TOKEN", {"SCRUM_GITHUB_TOKEN": value})
+
+
+def test_github_token_falls_back_to_the_gh_cli(monkeypatch):
+    monkeypatch.setattr(github_client, "gh_cli_token", lambda: "gh-token")
+    client = GitHubClient.from_env("SCRUM_GITHUB_TOKEN", {})
+    assert (client.token, client.source) == ("gh-token", "`gh auth token`")
+    assert "gh-token" not in repr(client)
+    explicit = GitHubClient.from_env("SCRUM_GITHUB_TOKEN", {"SCRUM_GITHUB_TOKEN": TOKEN})
+    assert (explicit.token, explicit.source) == (TOKEN, "SCRUM_GITHUB_TOKEN")
+
+
+def _fake_gh(tmp_path, script):
+    gh = tmp_path / "gh"
+    gh.write_text(f"#!/bin/sh\n{script}\n")
+    gh.chmod(0o755)
+    return str(tmp_path)
+
+
+def test_gh_cli_token_runs_only_gh_auth_token(tmp_path, monkeypatch):
+    log = tmp_path / "args"
+    monkeypatch.setenv("PATH", _fake_gh(tmp_path, f'echo "$@" > {log}; echo " gh-token "'))
+    assert real_gh_cli_token() == "gh-token"
+    assert log.read_text().strip() == "auth token"
+
+
+@pytest.mark.parametrize("script", ["exit 1", "echo ''"])
+def test_gh_cli_token_is_none_when_gh_is_logged_out(tmp_path, monkeypatch, script):
+    monkeypatch.setenv("PATH", _fake_gh(tmp_path, script))
+    assert real_gh_cli_token() is None
+
+
+def test_gh_cli_token_is_none_without_gh(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert real_gh_cli_token() is None
 
 
 # --- orchestration ---------------------------------------------------------------------------

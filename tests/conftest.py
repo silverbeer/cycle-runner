@@ -7,6 +7,7 @@ import pytest
 
 from cycle_runner import linear_tools
 from cycle_runner.agent import MODEL
+from cycle_runner.scrum import github_client
 
 
 def _ollama_has_model() -> bool:
@@ -36,6 +37,7 @@ def no_real_linear(request, monkeypatch):
             monkeypatch.delenv(name, raising=False)
     if request.node.get_closest_marker("github_read") is None:
         monkeypatch.delenv("SCRUM_GITHUB_TOKEN", raising=False)  # the Scrum Master's read-only token
+        monkeypatch.setattr(github_client, "gh_cli_token", lambda: None)  # and its fallback, the gh CLI's
     yield
     real_client.cache_clear()
 
