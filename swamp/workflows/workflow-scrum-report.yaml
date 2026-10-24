@@ -1,0 +1,59 @@
+id: ce3a5b93-e078-45ab-8cb4-eea1535cd9b8
+name: scrum-report
+description: Scrum Master health report, collect -> analyze -> render (read-only)
+tags: {}
+jobs:
+  - name: report
+    description: Run the three scrum-master stages in order
+    steps:
+      - name: collect
+        description: Read Linear, GitHub and git into a snapshot
+        task:
+          type: model_method
+          modelIdOrName: scrum-master
+          methodName: collect
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: snapshot-has-issues
+        description: Stop before analyzing an empty snapshot
+        task:
+          type: assert
+          expr: >-
+            data.latest("scrum-master", "snapshot").attributes.issues.size() > 0
+          message: snapshot has no issues; Linear returned nothing
+        dependsOn:
+          - step: collect
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: analyze
+        description: Apply the rules to the snapshot
+        task:
+          type: model_method
+          modelIdOrName: scrum-master
+          methodName: analyze
+        dependsOn:
+          - step: snapshot-has-issues
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: render
+        description: Render the report as Markdown
+        task:
+          type: model_method
+          modelIdOrName: scrum-master
+          methodName: render
+          inputs:
+            format: markdown
+        dependsOn:
+          - step: analyze
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1
