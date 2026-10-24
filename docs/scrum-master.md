@@ -292,4 +292,5 @@ runs only the offline set.
 
 No container, no Kubernetes, no schedule, no Telegram, no notification
 history, no Swamp, no LLM summary. The stage boundaries are where those
-attach later; SB-1386 is the Swamp spike.
+attach later. The Swamp spike (SB-1386) is written up in
+[swamp-spike.md](swamp-spike.md).
