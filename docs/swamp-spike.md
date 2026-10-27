@@ -5,7 +5,7 @@ better than the plain CLI does? This spike wraps the three `scrum-master`
 stages as one Swamp behavior and chains them in a workflow. It is read-only,
 like the CLI: nothing is written to Linear, GitHub or git.
 
-**Verdict: don't adopt it for cycle-runner yet.** The workflow works, and
+**Verdict: don't adopt it for cycle-runner. Dropped 2026-10-27 (see the end of this doc).** The workflow works, and
 versioned stage data with an assert gate is nice to have. But the CLI already
 has clean stage boundaries, and Swamp adds a hosted account, a second language
 and a runtime auth dependency for a three-step linear pipeline. None of that
@@ -89,25 +89,10 @@ tried here. For the daily notification path, the existing k3s CronJob running
 the plain CLI is simpler, and the formatting work belongs in `render` either
 way.
 
-## Running on a schedule (SB-1441)
+## Dropped (SB-1442, 2026-10-27)
 
-`scrum-report` now runs weekdays at 08:00 local time on this mac
-(`trigger.schedule: "0 8 * * 1-5"`). Scheduled workflows fire only while
-`swamp serve` is running, so serve runs as a launchd user agent:
-
-```bash
-swamp/bin/install-daemon     # install or reinstall the agent
-curl -s 127.0.0.1:9090/health | jq .scheduling   # next fire time
-swamp data query 'modelName == "scrum-master" && name == "rendered"' --select content
-```
-
-`swamp serve daemon enable` writes a plist with a bare PATH and none of
-`~/.zshenv`, so `uv`, `op` and `gh` aren't found and the `op-agents` vault
-has no token. `bin/install-daemon` points the plist at `bin/serve`, which sets
-PATH, reads the token from `~/.config/op/agent-token` and execs serve. Re-run
-it after any `swamp serve daemon enable`.
-
-The output is stored only. No notification is sent. Serve binds 127.0.0.1 with
-`--auth-mode none` (deprecated), so any local process can start a run. Every
-workflow here is read-only. It runs only while you're logged in, and missed
-fires are not caught up.
+After the spike, `scrum-report` ran on a weekday schedule from a local
+`swamp serve` launchd agent (SB-1441, #23). We decided not to continue: the
+plain-CLI standup on k3s already covers the daily path. `swamp/` was deleted
+and swamp uninstalled from this machine. The code is in git history: commit
+`cc5ac51` has the spike, and #23 has the schedule.

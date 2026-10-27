@@ -4,7 +4,7 @@
 
 Each stage is a plain function over JSON-serialisable Pydantic models, so it can
 run on its own (`scrum-master collect | analyze | render`) and be wrapped later
-(a Swamp behavior, a k3s CronJob) without changing it.
+(a k3s CronJob, Telegram) without changing it.
 
 Nothing here writes anywhere outside the local filesystem: Linear is read with a
 read-scoped app token, GitHub only with GET and GraphQL queries, git only with

@@ -1,6 +1,0 @@
-id: cf060764-61e9-488c-81d2-0867947a09d4
-name: op-agents
-type: '@swamp/1password'
-config:
-  op_vault: agents
-createdAt: '2026-10-24T16:08:58.341Z'
