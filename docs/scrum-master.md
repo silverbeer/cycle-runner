@@ -14,7 +14,7 @@ collect ─► snapshot.json ─► analyze ─► report.json ─► render (te
 
 Each stage is a plain function over a versioned Pydantic document, and each
 can be run on its own (`scrum-master collect | analyze | render`). That keeps
-them easy to wrap later (a Swamp behavior, a k3s CronJob, Telegram) without
+them easy to wrap later (a k3s CronJob, Telegram) without
 changing them. None of that is in this version.
 
 ## Install and set up
@@ -292,5 +292,5 @@ runs only the offline set.
 
 No container, no Kubernetes, no schedule, no Telegram, no notification
 history, no Swamp, no LLM summary. The stage boundaries are where those
-attach later. The Swamp spike (SB-1386) is written up in
+attach later. A Swamp wrapper was tried and dropped (SB-1386, SB-1442); see
 [swamp-spike.md](swamp-spike.md).
