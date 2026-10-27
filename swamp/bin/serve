@@ -1,0 +1,12 @@
+#!/bin/sh
+# launchd entry point for `swamp serve`. launchd gives a bare PATH and none of
+# ~/.zshenv, so the scrum-master behavior could not find uv, op or gh, and the
+# op-agents vault had no service-account token. Set both, then hand off.
+set -eu
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export SWAMP_NO_TELEMETRY=1
+token="$HOME/.config/op/agent-token"
+[ -r "$token" ] || { echo "missing $token" >&2; exit 1; }
+OP_SERVICE_ACCOUNT_TOKEN="$(cat "$token")"
+export OP_SERVICE_ACCOUNT_TOKEN
+exec swamp serve "$@"

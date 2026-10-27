@@ -88,3 +88,26 @@ stage history becomes a requirement. Scheduled workflows exist but weren't
 tried here. For the daily notification path, the existing k3s CronJob running
 the plain CLI is simpler, and the formatting work belongs in `render` either
 way.
+
+## Running on a schedule (SB-1441)
+
+`scrum-report` now runs weekdays at 08:00 local time on this mac
+(`trigger.schedule: "0 8 * * 1-5"`). Scheduled workflows fire only while
+`swamp serve` is running, so serve runs as a launchd user agent:
+
+```bash
+swamp/bin/install-daemon     # install or reinstall the agent
+curl -s 127.0.0.1:9090/health | jq .scheduling   # next fire time
+swamp data query 'modelName == "scrum-master" && name == "rendered"' --select content
+```
+
+`swamp serve daemon enable` writes a plist with a bare PATH and none of
+`~/.zshenv`, so `uv`, `op` and `gh` aren't found and the `op-agents` vault
+has no token. `bin/install-daemon` points the plist at `bin/serve`, which sets
+PATH, reads the token from `~/.config/op/agent-token` and execs serve. Re-run
+it after any `swamp serve daemon enable`.
+
+The output is stored only. No notification is sent. Serve binds 127.0.0.1 with
+`--auth-mode none` (deprecated), so any local process can start a run. Every
+workflow here is read-only. It runs only while you're logged in, and missed
+fires are not caught up.
