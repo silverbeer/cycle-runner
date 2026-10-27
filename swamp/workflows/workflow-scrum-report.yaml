@@ -2,6 +2,8 @@ id: ce3a5b93-e078-45ab-8cb4-eea1535cd9b8
 name: scrum-report
 description: Scrum Master health report, collect -> analyze -> render (read-only)
 tags: {}
+trigger:
+  schedule: "0 8 * * 1-5"
 jobs:
   - name: report
     description: Run the three scrum-master stages in order
